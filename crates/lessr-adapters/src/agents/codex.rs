@@ -273,3 +273,145 @@ fn runs(text: &str, names: &[&str]) -> bool {
                 .any(|name| matcher_groups::mentions(command, name))
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::parse_hook_input;
+    use crate::plan::apply;
+
+    const HOOK: &str = "lessr hook codex";
+
+    fn setup() -> (tempfile::TempDir, Paths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::with_roots(tmp.path().join("home"), tmp.path().join("config"));
+        (tmp, paths)
+    }
+
+    fn write_config(paths: &Paths, text: &str) {
+        let path = config_path(paths);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn config(paths: &Paths) -> String {
+        std::fs::read_to_string(config_path(paths)).unwrap()
+    }
+
+    #[test]
+    fn the_block_is_valid_toml_with_a_timeout_in_seconds() {
+        let (_tmp, paths) = setup();
+        apply(&crate::plan_init(&paths, AgentId::Codex, HOOK).unwrap()).unwrap();
+
+        let table: toml::Table = config(&paths).parse().unwrap();
+        let group = &table["hooks"]["PreToolUse"].as_array().unwrap()[0];
+        assert_eq!(group["matcher"].as_str(), Some(MATCHER));
+        let entry = &group["hooks"].as_array().unwrap()[0];
+        assert_eq!(entry["type"].as_str(), Some("command"));
+        assert_eq!(entry["command"].as_str(), Some(HOOK));
+        assert_eq!(
+            entry["timeout"].as_integer(),
+            Some(5),
+            "seconds, not milliseconds"
+        );
+    }
+
+    #[test]
+    fn the_user_keeps_every_byte_outside_our_block() {
+        let (_tmp, paths) = setup();
+        let original = "# my notes\nmodel = \"o3\"\n\n[tui]\ntheme   =   \"dark\"\n";
+        write_config(&paths, original);
+
+        apply(&crate::plan_init(&paths, AgentId::Codex, HOOK).unwrap()).unwrap();
+        let patched = config(&paths);
+        assert!(
+            patched.starts_with(original),
+            "the block is appended, not merged"
+        );
+        assert!(patched.contains(BEGIN) && patched.contains(END));
+
+        // And uninstall puts it back exactly, from the backup taken first.
+        apply(&crate::plan_uninstall(&paths, AgentId::Codex).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read(config_path(&paths)).unwrap(),
+            original.as_bytes()
+        );
+    }
+
+    #[test]
+    fn removing_the_block_inverts_adding_it() {
+        let original = "model = \"o3\"\n";
+        let patched = append_block(original, HOOK);
+        assert_eq!(remove_block(&patched).as_deref(), Some(original));
+        assert_eq!(remove_block(original), None);
+    }
+
+    #[test]
+    fn a_config_we_created_is_deleted_rather_than_left_empty() {
+        let (_tmp, paths) = setup();
+        apply(&crate::plan_init(&paths, AgentId::Codex, HOOK).unwrap()).unwrap();
+        apply(&crate::plan_uninstall(&paths, AgentId::Codex).unwrap()).unwrap();
+        assert!(!config_path(&paths).exists());
+    }
+
+    #[test]
+    fn a_config_whose_hooks_are_not_ours_to_extend_is_refused() {
+        let (_tmp, paths) = setup();
+        write_config(&paths, "[hooks]\nPreToolUse = \"handled elsewhere\"\n");
+        let err = crate::plan_init(&paths, AgentId::Codex, HOOK).unwrap_err();
+        assert!(err.to_string().contains("TOML"), "{err}");
+        assert_eq!(
+            config(&paths),
+            "[hooks]\nPreToolUse = \"handled elsewhere\"\n"
+        );
+    }
+
+    #[test]
+    fn an_existing_rtk_hook_is_reported_and_left_alone() {
+        let (_tmp, paths) = setup();
+        write_config(
+            &paths,
+            "[[hooks.PreToolUse]]\nmatcher = \"shell\"\n\n[[hooks.PreToolUse.hooks]]\n\
+             type = \"command\"\ncommand = \"/usr/local/bin/rtk hook codex\"\n",
+        );
+        let found = ADAPTER.detect(&paths);
+        assert!(found.rtk_present);
+        assert!(!found.already_patched);
+
+        apply(&crate::plan_init(&paths, AgentId::Codex, HOOK).unwrap()).unwrap();
+        let table: toml::Table = config(&paths).parse().unwrap();
+        let groups = table["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "our own group, beside rtk's");
+        assert_eq!(
+            groups[0]["hooks"].as_array().unwrap()[0]["command"].as_str(),
+            Some("/usr/local/bin/rtk hook codex"),
+            "rtk's entry keeps its bytes"
+        );
+    }
+
+    #[test]
+    fn a_name_in_a_comment_is_not_an_installed_hook() {
+        assert!(!runs(
+            "# lessr hook codex would go here\nmodel = \"o3\"\n",
+            &[LESSR]
+        ));
+    }
+
+    #[test]
+    fn the_hook_reads_its_payload_and_says_nothing() {
+        // Codex cannot replace a tool result, so the payload parses and the
+        // hook prints nothing at all rather than a decision it would reject.
+        let payload = parse_hook_input(
+            AgentId::Codex,
+            br#"{"hook_event_name": "PreToolUse", "tool_name": "shell"}"#,
+        )
+        .unwrap();
+        assert!(payload.result().is_none());
+        assert!(
+            crate::render_hook_output(AgentId::Codex, &payload)
+                .unwrap()
+                .is_empty(),
+            "never a bare allow, which Codex rejects"
+        );
+    }
+}

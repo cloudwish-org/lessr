@@ -282,3 +282,129 @@ fn explicit_selection(tool: ToolKind, args: Option<&Value>) -> bool {
         ToolKind::Shell | ToolKind::Edit | ToolKind::Other => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::{parse_hook_input, render_hook_output};
+    use crate::plan::apply;
+
+    const HOOK: &str = "lessr hook gemini";
+
+    fn setup() -> (tempfile::TempDir, Paths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::with_roots(tmp.path().join("home"), tmp.path().join("config"));
+        (tmp, paths)
+    }
+
+    fn write_settings(paths: &Paths, text: &str) {
+        let path = settings_path(paths);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn settings(paths: &Paths) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(settings_path(paths)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_entry_carries_a_name_and_a_timeout_in_milliseconds() {
+        let (_tmp, paths) = setup();
+        apply(&crate::plan_init(&paths, AgentId::GeminiCli, HOOK).unwrap()).unwrap();
+
+        let group = &settings(&paths)["hooks"]["AfterTool"][0];
+        assert_eq!(group["matcher"], LAYOUT.matcher);
+        let entry = &group["hooks"][0];
+        assert_eq!(entry["name"], "lessr");
+        assert_eq!(entry["type"], "command");
+        assert_eq!(entry["command"], HOOK);
+        assert_eq!(entry["timeout"], 5000, "milliseconds, not seconds");
+    }
+
+    #[test]
+    fn an_rtk_hook_is_chained_and_the_file_comes_back_byte_for_byte() {
+        let (_tmp, paths) = setup();
+        let original = "{\n\t\"theme\":\"dark\",\n  \"hooks\": {\"AfterTool\": [\n    {\"matcher\": \"run_shell_command\", \"hooks\": [{\"type\": \"command\", \"command\": \"rtk hook gemini\"}]}\n  ]}\n}";
+        write_settings(&paths, original);
+
+        apply(&crate::plan_init(&paths, AgentId::GeminiCli, HOOK).unwrap()).unwrap();
+        let groups = settings(&paths)["hooks"]["AfterTool"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(groups.len(), 1, "chained inside rtk's group");
+        assert_eq!(groups[0]["hooks"][0]["command"], "rtk hook gemini");
+        assert_eq!(groups[0]["hooks"][1]["command"], HOOK);
+
+        let found = ADAPTER.detect(&paths);
+        assert!(found.rtk_present && found.already_patched);
+
+        apply(&crate::plan_uninstall(&paths, AgentId::GeminiCli).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read(settings_path(&paths)).unwrap(),
+            original.as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_filtered_result_is_printed_as_a_decision_and_nothing_else() {
+        let input = br#"{"tool_name": "run_shell_command", "tool_input": {"command": "/usr/bin/cargo test"}, "tool_response": {"stdout": "long output\n"}}"#;
+        let mut payload = parse_hook_input(AgentId::GeminiCli, input).unwrap();
+
+        let result = payload.result().unwrap();
+        assert_eq!(result.tool, ToolKind::Shell);
+        assert_eq!(result.command.as_ref().unwrap().program, "cargo");
+        assert_eq!(result.content.as_ref(), b"long output\n");
+
+        payload.result_mut().unwrap().content = Bytes::from_static(b"short\n");
+        let out = render_hook_output(AgentId::GeminiCli, &payload).unwrap();
+        let decision: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(decision["decision"], "deny");
+        assert_eq!(decision["reason"], "short\n");
+        assert_eq!(
+            decision.as_object().unwrap().len(),
+            2,
+            "nothing else on stdout"
+        );
+    }
+
+    #[test]
+    fn a_payload_we_cannot_read_prints_nothing_at_all() {
+        let payload =
+            parse_hook_input(AgentId::GeminiCli, br#"{"tool_name": "web_fetch"}"#).unwrap();
+        assert!(payload.result().is_none());
+        assert!(
+            render_hook_output(AgentId::GeminiCli, &payload)
+                .unwrap()
+                .is_empty(),
+            "silence is how a decision hook says `no opinion`"
+        );
+    }
+
+    #[test]
+    fn the_reader_tries_the_places_the_output_could_be() {
+        for input in [
+            br#"{"tool_response": {"output": "x"}}"#.as_slice(),
+            br#"{"tool_response": "x"}"#.as_slice(),
+            br#"{"output": "x"}"#.as_slice(),
+            br#"{"result": "x"}"#.as_slice(),
+        ] {
+            let payload = parse_hook_input(AgentId::GeminiCli, input).unwrap();
+            assert_eq!(
+                payload.result().map(|r| r.content.clone()),
+                Some(Bytes::from_static(b"x")),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn a_search_with_a_pattern_is_an_explicit_selection() {
+        let input = br#"{"tool_name": "search_file_content", "args": {"pattern": "fn main"}, "tool_response": {"stdout": "x"}}"#;
+        let payload = parse_hook_input(AgentId::GeminiCli, input).unwrap();
+        let result = payload.result().unwrap();
+        assert_eq!(result.tool, ToolKind::Search);
+        assert!(result.explicit_selection, "loop-safety rule 1");
+    }
+}

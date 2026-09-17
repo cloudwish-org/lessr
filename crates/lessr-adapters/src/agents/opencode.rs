@@ -207,3 +207,133 @@ fn explicit_selection(tool: ToolKind, args: Option<&Value>) -> bool {
         ToolKind::Shell | ToolKind::Edit | ToolKind::Other => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::{parse_hook_input, render_hook_output};
+    use crate::plan::{Change, apply};
+
+    const HOOK: &str = "lessr hook opencode";
+
+    fn setup() -> (tempfile::TempDir, Paths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::with_roots(tmp.path().join("home"), tmp.path().join("config"));
+        (tmp, paths)
+    }
+
+    fn plugin(paths: &Paths) -> PathBuf {
+        super::super::home_join(paths, PLUGIN)
+    }
+
+    #[test]
+    fn the_plugin_lands_in_the_singular_plugin_directory() {
+        let (_tmp, paths) = setup();
+        let plan = crate::plan_init(&paths, AgentId::OpenCode, HOOK).unwrap();
+        apply(&plan).unwrap();
+
+        let path = plugin(&paths);
+        assert!(
+            path.ends_with(".config/opencode/plugin/lessr.ts"),
+            "{path:?}"
+        );
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(source.contains(MARKER), "it has to be recognisable as ours");
+        assert!(source.contains("\"lessr hook opencode\""), "{source}");
+        assert!(source.contains("tool.execute.after"), "{source}");
+    }
+
+    #[test]
+    fn the_plugin_exports_one_function_and_nothing_else() {
+        // OpenCode's legacy loader calls everything a module exports; a
+        // non-function export makes it throw and takes the agent with it.
+        let source = plugin_source(HOOK);
+        let exports: Vec<&str> = source
+            .lines()
+            .filter(|line| line.starts_with("export"))
+            .collect();
+        assert_eq!(exports.len(), 1, "{exports:?}");
+        assert!(
+            exports[0].starts_with("export const server = async () =>"),
+            "{exports:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_with_a_space_in_its_path_is_embedded_safely() {
+        let source = plugin_source("/opt/my tools/lessr hook opencode");
+        assert!(
+            source.contains(r#"const COMMAND = "/opt/my tools/lessr hook opencode";"#),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn uninstalling_removes_the_plugin_we_wrote() {
+        let (_tmp, paths) = setup();
+        apply(&crate::plan_init(&paths, AgentId::OpenCode, HOOK).unwrap()).unwrap();
+        assert!(plugin(&paths).exists());
+
+        let undo = crate::plan_uninstall(&paths, AgentId::OpenCode).unwrap();
+        assert!(matches!(undo.changes.as_slice(), [Change::Delete { .. }]));
+        apply(&undo).unwrap();
+        assert!(!plugin(&paths).exists());
+
+        // Twice is allowed.
+        assert!(
+            crate::plan_uninstall(&paths, AgentId::OpenCode)
+                .unwrap()
+                .is_noop()
+        );
+    }
+
+    #[test]
+    fn a_plugin_we_did_not_write_is_backed_up_and_then_restored() {
+        let (_tmp, paths) = setup();
+        let path = plugin(&paths);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = "export const server = async () => ({});\n";
+        std::fs::write(&path, theirs).unwrap();
+
+        let plan = crate::plan_init(&paths, AgentId::OpenCode, HOOK).unwrap();
+        assert!(matches!(plan.changes.first(), Some(Change::Backup { .. })));
+        apply(&plan).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(MARKER));
+
+        apply(&crate::plan_uninstall(&paths, AgentId::OpenCode).unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+    }
+
+    #[test]
+    fn the_payload_the_plugin_sends_round_trips() {
+        let input = br#"{"input": {"tool": "bash", "args": {"command": "/usr/bin/cargo test"}}, "output": {"title": "cargo test", "output": "long\noutput\n", "metadata": {"exit": 0}}}"#;
+        let mut payload = parse_hook_input(AgentId::OpenCode, input).unwrap();
+
+        let result = payload.result().unwrap();
+        assert_eq!(result.tool, ToolKind::Shell);
+        assert_eq!(result.tool_name, "bash");
+        assert_eq!(result.command.as_ref().unwrap().program, "cargo");
+        assert_eq!(result.content.as_ref(), b"long\noutput\n");
+
+        payload.result_mut().unwrap().content = Bytes::from_static(b"short\n");
+        let out = render_hook_output(AgentId::OpenCode, &payload).unwrap();
+        let written: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(written["output"]["output"], "short\n");
+        assert_eq!(
+            written["output"]["title"], "cargo test",
+            "the rest is untouched"
+        );
+        assert_eq!(written["output"]["metadata"]["exit"], 0);
+        assert_eq!(written["input"]["tool"], "bash");
+    }
+
+    #[test]
+    fn a_read_with_a_range_is_an_explicit_selection() {
+        let input = br#"{"input": {"tool": "read", "args": {"filePath": "/src/lib.rs", "offset": 10}}, "output": {"output": "x"}}"#;
+        let payload = parse_hook_input(AgentId::OpenCode, input).unwrap();
+        let result = payload.result().unwrap();
+        assert_eq!(result.tool, ToolKind::Read);
+        assert_eq!(result.path, Some(PathBuf::from("/src/lib.rs")));
+        assert!(result.explicit_selection);
+    }
+}

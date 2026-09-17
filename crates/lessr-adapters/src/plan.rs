@@ -115,7 +115,7 @@ impl Plan {
                 } => {
                     let label = path.display();
                     let verb = if before.is_some() { "patch" } else { "create" };
-                    let _ = writeln!(out, "  {verb}   {label}: {summary}");
+                    let _ = writeln!(out, "  {verb:<7} {label}: {summary}");
                     let body =
                         diff::unified(before.as_deref().unwrap_or(""), after, &label.to_string());
                     indent_into(&mut out, &body, "    ");
@@ -191,7 +191,9 @@ pub struct Applied {
 ///
 /// `hook_command` is what the agent should run, e.g. `lessr hook claude`. The
 /// caller owns it because the binary's own name and path are the caller's
-/// business: a Homebrew install and a `cargo run` are not the same string.
+/// business: a Homebrew install and a `cargo run` are not the same string. It
+/// is a shell-ready command line — every agent here hands it to a shell, so a
+/// path with a space in it has to arrive already quoted.
 pub fn plan_init(paths: &Paths, agent: AgentId, hook_command: &str) -> Result<Plan> {
     let adapter = agents::adapter(agent);
     let plan = adapter.plan_init(paths, hook_command)?;

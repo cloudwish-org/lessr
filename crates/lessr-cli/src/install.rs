@@ -91,6 +91,16 @@ fn run_plans(verb: &str, plans: &[Plan], show: bool, yes: bool) -> Result<ExitCo
     Ok(ExitCode::SUCCESS)
 }
 
+/// Agents `lessr init` patches only when asked for by name.
+///
+/// Codex's config format is verified and its writer works, but its
+/// `PostToolUse` cannot replace tool output, so a hook installed there today
+/// is a process spawn on every tool call that provably cannot save a token.
+/// Lessr may only make a session cheaper, never slower (`docs/LOOP_SAFETY.md`),
+/// so Codex waits until either it gains output replacement or the gate moves
+/// to a path that its hooks can serve.
+const OPT_IN_ONLY: &[AgentId] = &[AgentId::Codex];
+
 /// Whether a plan would actually touch the filesystem.
 ///
 /// `Manual` and `Nothing` are things we tell the user; the rest are things we
@@ -101,6 +111,7 @@ fn writes_files(plan: &Plan) -> bool {
             change,
             Change::WriteJson { .. }
                 | Change::WriteFile { .. }
+                | Change::Delete { .. }
                 | Change::Backup { .. }
                 | Change::Restore { .. }
         )
@@ -129,7 +140,7 @@ fn targets(paths: &Paths, agent: Option<&str>) -> Result<Vec<AgentId>> {
 
     let mut found: Vec<AgentId> = lessr_adapters::detect(paths)
         .into_iter()
-        .filter(|d| d.installed)
+        .filter(|d| d.installed && !OPT_IN_ONLY.contains(&d.agent))
         .map(|d| d.agent)
         .collect();
     if !found.contains(&AgentId::Generic) {
@@ -148,7 +159,30 @@ fn hook_command(agent: AgentId) -> String {
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_else(|| "lessr".to_string());
-    format!("{exe} hook {}", agent.as_str())
+    format!("{} hook {}", shell_quote(&exe), agent.as_str())
+}
+
+/// Quote a path so it survives the shell every agent hands this command to.
+///
+/// Not hypothetical: the default install directory on macOS is
+/// `~/Library/Application Support/lessr`, and an unquoted space there breaks
+/// the hook on every tool call, for every agent, silently.
+fn shell_quote(path: &str) -> String {
+    // Characters that mean nothing to a shell. A backslash is safe on Windows,
+    // where it is a path separator, and an escape everywhere else.
+    let plain = |b: u8| {
+        b.is_ascii_alphanumeric() || b"/._-+=:@%".contains(&b) || (cfg!(windows) && b == b'\\')
+    };
+    if !path.is_empty() && path.bytes().all(plain) {
+        return path.to_string();
+    }
+    if cfg!(windows) {
+        format!("\"{}\"", path.replace('"', "\\\""))
+    } else {
+        // Inside single quotes everything is literal except a single quote,
+        // which has to be closed, escaped and reopened.
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
 }
 
 /// Ask before touching someone's editor config.
@@ -167,4 +201,82 @@ fn confirm(question: &str) -> Result<bool> {
         line.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_path_is_left_alone() {
+        assert_eq!(shell_quote("/usr/local/bin/lessr"), "/usr/local/bin/lessr");
+        assert_eq!(
+            shell_quote("/opt/homebrew/bin/lessr"),
+            "/opt/homebrew/bin/lessr"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_with_a_space_is_quoted() {
+        assert_eq!(
+            shell_quote("/Users/dev/Library/Application Support/lessr/lessr"),
+            "'/Users/dev/Library/Application Support/lessr/lessr'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_with_a_quote_survives() {
+        // Closed, escaped, reopened: '\'' is the only way through single quotes.
+        assert_eq!(
+            shell_quote("/home/o'brien/bin/lessr"),
+            r"'/home/o'\''brien/bin/lessr'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_metacharacters_cannot_escape_the_quotes() {
+        for nasty in [
+            "/tmp/a;rm -rf ~/b",
+            "/tmp/$(whoami)/lessr",
+            "/tmp/a`id`b",
+            "/tmp/a&&b",
+        ] {
+            let quoted = shell_quote(nasty);
+            assert!(
+                quoted.starts_with('\'') && quoted.ends_with('\''),
+                "{quoted}"
+            );
+            // Nothing but the wrapping quotes; the payload keeps its bytes.
+            assert_eq!(&quoted[1..quoted.len() - 1], nasty, "{quoted}");
+        }
+    }
+
+    #[test]
+    fn deleting_a_file_counts_as_touching_the_filesystem() {
+        // Uninstalling an agent whose integration is a file we own is a Delete
+        // and nothing else. If that does not count as a write, uninstall says
+        // "Nothing to change" and leaves the plugin behind.
+        let plan = Plan {
+            agent: AgentId::OpenCode,
+            changes: vec![Change::Delete {
+                path: std::path::PathBuf::from("/tmp/lessr.ts"),
+            }],
+        };
+        assert!(writes_files(&plan));
+    }
+
+    #[test]
+    fn advice_alone_is_not_a_write() {
+        let plan = Plan {
+            agent: AgentId::Generic,
+            changes: vec![Change::Manual {
+                title: "Point your SDK at the proxy".into(),
+                snippet: "ANTHROPIC_BASE_URL=http://127.0.0.1:7433".into(),
+            }],
+        };
+        assert!(!writes_files(&plan));
+    }
 }

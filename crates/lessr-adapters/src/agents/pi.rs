@@ -180,3 +180,72 @@ fn tool_kind(tool_name: &str) -> ToolKind {
         _ => ToolKind::Other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::{parse_hook_input, render_hook_output};
+    use crate::plan::{Change, apply};
+
+    const HOOK: &str = "lessr hook pi";
+
+    fn setup() -> (tempfile::TempDir, Paths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::with_roots(tmp.path().join("home"), tmp.path().join("config"));
+        (tmp, paths)
+    }
+
+    #[test]
+    fn the_extension_is_written_where_pi_looks_for_it() {
+        let (_tmp, paths) = setup();
+        apply(&crate::plan_init(&paths, AgentId::Pi, HOOK).unwrap()).unwrap();
+
+        let path = super::super::home_join(&paths, EXTENSION);
+        assert!(path.ends_with(".pi/agent/extensions/lessr.ts"), "{path:?}");
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(source.contains(MARKER));
+        assert!(source.contains("export default function (pi)"), "{source}");
+        assert!(source.contains(r#"pi.on("tool_result""#), "{source}");
+        assert!(
+            source.contains(r#"const COMMAND = "lessr hook pi";"#),
+            "{source}"
+        );
+
+        assert!(ADAPTER.detect(&paths).already_patched);
+        let undo = crate::plan_uninstall(&paths, AgentId::Pi).unwrap();
+        assert!(matches!(undo.changes.as_slice(), [Change::Delete { .. }]));
+        apply(&undo).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_filtered_result_is_printed_as_a_content_patch() {
+        let input =
+            br#"{"event": {"tool": "bash", "content": "long\noutput\n", "isError": false}}"#;
+        let mut payload = parse_hook_input(AgentId::Pi, input).unwrap();
+        let result = payload.result().unwrap();
+        assert_eq!(result.tool, ToolKind::Shell);
+        assert_eq!(result.content.as_ref(), b"long\noutput\n");
+
+        payload.result_mut().unwrap().content = Bytes::from_static(b"short\n");
+        let out = render_hook_output(AgentId::Pi, &payload).unwrap();
+        let patch: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(patch["content"], "short\n");
+        assert_eq!(
+            patch.as_object().unwrap().len(),
+            1,
+            "only content: the rest is the tool's own account of the call"
+        );
+    }
+
+    #[test]
+    fn an_event_with_nothing_in_it_prints_nothing() {
+        let payload = parse_hook_input(AgentId::Pi, br#"{"event": {"tool": "bash"}}"#).unwrap();
+        assert!(payload.result().is_none());
+        assert!(
+            render_hook_output(AgentId::Pi, &payload)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

@@ -306,6 +306,94 @@ fn an_unknown_agent_name_is_an_error_not_a_no_op() {
     assert!(err.contains("emacs-doctor"), "{err}");
 }
 
+#[test]
+fn uninstalling_an_agent_whose_integration_is_a_file_actually_deletes_it() {
+    // OpenCode and pi are integrated by a plugin file Lessr owns rather than a
+    // config we patch, so their whole uninstall is a Delete. If Delete is not
+    // treated as touching the filesystem, uninstall reports "Nothing to
+    // change" and silently leaves the plugin running.
+    let home = sandbox();
+    let out = run(home.path(), &["init", "--yes", "--agent", "opencode"], None);
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let plugin = home.path().join(".config/opencode/plugin/lessr.ts");
+    assert!(
+        plugin.exists(),
+        "init did not write the plugin: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let out = run(
+        home.path(),
+        &["uninstall", "--yes", "--agent", "opencode"],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !plugin.exists(),
+        "uninstall left the plugin behind: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn the_installed_hook_command_survives_a_path_with_a_space() {
+    // Every agent hands the hook command to a shell. The default macOS install
+    // directory contains a space, so an unquoted path breaks the hook on every
+    // tool call, silently.
+    let home = sandbox();
+    let spaced = home.path().join("Application Support/lessr");
+    std::fs::create_dir_all(&spaced).unwrap();
+    let copied = spaced.join("lessr");
+    std::fs::copy(LESSR, &copied).unwrap();
+
+    let claude_dir = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(claude_dir.join("settings.json"), "{}\n").unwrap();
+
+    let out = std::process::Command::new(&copied)
+        .args(["init", "--yes", "--agent", "claude"])
+        .env("HOME", home.path())
+        .env("LESSR_HOME", home.path().join("lessr-config"))
+        .output()
+        .expect("failed to spawn the copied binary");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    let command = parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("a hook command was written");
+    assert!(
+        command.contains('\'') || !command.contains(' ') || command.starts_with('"'),
+        "the path was left unquoted and will break in a shell: {command}"
+    );
+    // Prove it rather than trusting the shape: run it through a real shell.
+    let via_shell = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{command} < /dev/null"))
+        .env("HOME", home.path())
+        .output()
+        .expect("failed to run the hook command through a shell");
+    assert!(
+        via_shell.status.success(),
+        "the installed command does not run in a shell: {command}\nstderr: {}",
+        String::from_utf8_lossy(&via_shell.stderr)
+    );
+}
+
 /// Kept last: a compile-time reminder that the binary path is a real file.
 #[test]
 fn the_binary_exists() {

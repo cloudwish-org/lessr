@@ -14,9 +14,12 @@
 //!   back to the original JSON and exit 0 (`docs/ADAPTERS.md`), and `lessr init`
 //!   can refuse a file rather than guess at it.
 //! * **Never guess a format.** An adapter either knows an agent's real on-disk
-//!   shape and patches it, or it prints instructions and writes nothing. A
-//!   wrong hook entry does not fail once; it fails on every tool call
-//!   afterwards. Today only Claude Code is verified — see [`agents`].
+//!   shape and writes it, or it prints instructions and writes nothing. A wrong
+//!   hook entry does not fail once; it fails on every tool call afterwards, and
+//!   the user has no reason to suspect the thing they installed to save tokens.
+//!   Claude Code, Codex, Gemini CLI, OpenCode and pi are written; Cursor and
+//!   Windsurf are not, because their entry schemas could not be confirmed; and
+//!   Cline, Roo and Kilo have no hook to write at all.
 //! * **Nothing leaves the machine** (invariant 6). This crate reads and writes
 //!   local files and opens no sockets.
 //!
