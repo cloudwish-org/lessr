@@ -4,7 +4,7 @@ One binary, two entry paths, one pipeline. Everything runs on localhost; the onl
 
 ```mermaid
 flowchart LR
-  A[Agent] -->|PreToolUse hook: tool result| H[lessr hook]
+  A[Agent] -->|post-tool hook: tool result| H[lessr hook]
   A -->|base_url| P[lessr proxy]
   H --> PL[Pipeline: Stage list]
   P --> PL
@@ -17,9 +17,13 @@ flowchart LR
 
 ## Entry paths
 
-**Hook path.** Agents that support pre-tool hooks (Claude Code, Cursor, Gemini CLI, Codex, OpenCode plugin) call `lessr hook <agent>` with the tool call as JSON on stdin. The pipeline runs `on_tool_result`; the rewritten result goes back on stdout. Gate, trap and dedup run here. One process spawn per call: keep startup under 2 ms (memory-mapped config and pack snapshots, no SQLite open on this path).
+**Hook path.** Agents whose hooks can replace tool *output* call `lessr hook <agent>` with the finished tool call as JSON on stdin: Claude Code (`PostToolUse`, `hookSpecificOutput.updatedToolOutput`, 2.1.121 or newer), Gemini CLI (`AfterTool`), OpenCode (`tool.execute.after`) and pi (`tool_result`). The pipeline runs `on_tool_result`; the replacement goes back on stdout in whatever envelope that agent reads, and **nothing at all when there is nothing to change**. Gate, trap and dedup run here. One process spawn per call: keep startup under 2 ms (memory-mapped config and pack snapshots, no SQLite open on this path).
+
+A *pre*-tool hook is the wrong event for this work: it fires before the tool runs, so there is no output to shrink. Rewriting the command instead is worse than useless — Claude Code evaluates the user's permission rules against the rewritten input, so a rewrite silently stops matching their own allow and deny rules. Lessr does not do it. See [ADAPTERS.md](ADAPTERS.md) for which agents can be reached and how.
 
 **Proxy path.** Agents and SDKs point `base_url` at `http://127.0.0.1:7433`. `lessr-proxy` accepts `/v1/messages` (Anthropic) and `/v1/chat/completions` (OpenAI shape), runs `on_request`, forwards with the original headers, streams the body back byte-for-byte, and parses usage from the final SSE event or JSON body. Detection runs here; the free engine only reports.
+
+This is how every agent without a usable hook is reached, and the only path for an SDK. It is not the default on an agent that has a hook: pointing Claude Code at a non-Anthropic `base_url` makes it treat Lessr as a third-party gateway and turns off Remote Control, tool search and server-managed settings. A tool that claims to be invisible cannot do that silently, so on Claude Code the proxy is opt-in and prints what it costs.
 
 ## The pipeline
 
