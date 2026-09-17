@@ -58,6 +58,9 @@ const SETTINGS: &str = ".gemini/settings.json";
 const LAYOUT: Layout = Layout {
     event: "AfterTool",
     matcher: "run_shell_command|read_file|read_many_files|search_file_content|glob",
+    // Gemini CLI replaces output on the same event rtk would hook, so an rtk
+    // entry here is one we run behind rather than beside.
+    chain_behind_rtk: true,
 };
 
 /// How long Gemini CLI waits for us, in milliseconds. The pipeline's own hard

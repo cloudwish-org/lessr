@@ -6,16 +6,17 @@
 //! error → original JSON, exit 0, error logged. A hook must never break the
 //! agent."
 //!
-//! "The same JSON back" is Claude Code's contract, and OpenCode's, because we
-//! wrote the OpenCode side too. Others want a small decision document instead,
-//! so the shape of the output belongs to the adapter — see
-//! [`crate::agents::Adapter::render_hook`]. What every agent shares is the rule
-//! underneath: when there is nothing to filter, say nothing new.
+//! "The same JSON back" turns out to be *nobody's* contract but our own. Claude
+//! Code wants a `hookSpecificOutput` envelope, Gemini CLI a decision document,
+//! pi a patch; the only agents that read back the document they sent are the
+//! ones whose bridge this crate wrote itself (OpenCode's plugin). The shape of
+//! the output therefore belongs to the adapter — see
+//! [`crate::agents::Adapter::render_hook`] — and every one of them shares the
+//! rule underneath: with nothing to say, say nothing, and exit 0 either way.
 //!
-//! That is why [`HookPayload`] keeps the bytes it was given as well as the
-//! parsed form: an unchanged payload goes back exactly as it arrived rather
-//! than re-serialised, so nothing about the agent's own JSON changes on the way
-//! through.
+//! [`HookPayload`] keeps the bytes it was given as well as the parsed form so
+//! that the agents whose contract *is* an echo get their own JSON back
+//! untouched rather than re-serialised.
 
 use lessr_core::ToolResult;
 use serde_json::Value;
@@ -139,6 +140,16 @@ pub fn parse_hook_input(agent: AgentId, input: &[u8]) -> Result<HookPayload> {
 /// With nothing to substitute, the agent gets whatever it reads as "no
 /// opinion": its own payload back for the agents whose contract is an echo,
 /// and nothing at all for the agents that read stdout as a decision.
+/// What this agent's hook should print when nothing changed.
+///
+/// Per agent, because the convention is: Claude Code, Gemini CLI and pi read
+/// silence as "leave the output alone", while a bridge this crate wrote itself
+/// — the OpenCode plugin — expects its document back. The caller knows whether
+/// the pipeline changed anything; only the adapter knows how to say "no".
+pub fn render_hook_unchanged(agent: AgentId, input: &[u8]) -> Vec<u8> {
+    agents::adapter(agent).render_unchanged(input)
+}
+
 pub fn render_hook_output(agent: AgentId, payload: &HookPayload) -> Result<Vec<u8>> {
     if agent != payload.agent {
         return Err(Error::AgentMismatch {
@@ -185,12 +196,27 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_with_nothing_to_filter_renders_byte_for_byte() {
+    fn a_payload_with_nothing_to_filter_says_nothing() {
         let input = b"{\n  \"hook_event_name\": \"PreToolUse\",\n  \"tool_name\": \"Bash\"\n}\n";
         let payload = parse_hook_input(AgentId::ClaudeCode, input).unwrap();
         assert!(payload.result().is_none());
+        assert!(
+            render_hook_output(AgentId::ClaudeCode, &payload)
+                .unwrap()
+                .is_empty(),
+            "Claude Code reads stdout for an envelope, not for its own payload"
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_contract_is_an_echo_gets_its_bytes_back() {
+        // OpenCode's bridge is one this crate wrote, and it reads the document
+        // back, so an unchanged payload returns exactly as it arrived.
+        let input = b"{\n  \"input\": {\"tool\": \"bash\"}\n}\n";
+        let payload = parse_hook_input(AgentId::OpenCode, input).unwrap();
+        assert!(payload.result().is_none());
         assert_eq!(
-            render_hook_output(AgentId::ClaudeCode, &payload).unwrap(),
+            render_hook_output(AgentId::OpenCode, &payload).unwrap(),
             input.to_vec()
         );
     }

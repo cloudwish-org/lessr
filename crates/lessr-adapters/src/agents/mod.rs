@@ -92,10 +92,11 @@ pub(crate) trait Adapter: Sync {
     /// Render what this agent expects on stdout once a stage has rewritten the
     /// content.
     ///
-    /// The default is the contract `docs/ADAPTERS.md` states — the same JSON
-    /// back, with the result substituted in — which is what an agent that reads
-    /// stdout as a replacement payload wants. An agent that reads stdout as a
-    /// decision document overrides this.
+    /// The default is the document back with the result substituted in, which
+    /// is what the bridges this crate wrote itself expect (OpenCode's plugin
+    /// reads exactly that). Every agent whose hook protocol is its own —
+    /// Claude Code's `hookSpecificOutput` envelope, Gemini CLI's decision
+    /// document, pi's patch — overrides this, and none of them accept an echo.
     fn render_hook(&self, root: &Value, slot: Slot, content: &str) -> Result<Vec<u8>> {
         let mut json = root.clone();
         slot.put(&mut json, content);

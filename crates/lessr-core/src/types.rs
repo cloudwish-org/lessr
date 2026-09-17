@@ -55,6 +55,129 @@ impl Mode {
             Mode::Active => "active",
         }
     }
+
+    /// Read a mode from what a config file, an environment variable or
+    /// `lessr on|off` wrote. `None` for anything else: a mode nobody can spell
+    /// falls back to the layer below rather than guessing (`docs/CONFIG.md`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Mode::Off),
+            "shadow" => Some(Mode::Shadow),
+            // `on` is what `lessr on <stage>` means, and what a user writes.
+            "active" | "on" => Some(Mode::Active),
+            _ => None,
+        }
+    }
+
+    /// The byte that stands for this mode in the snapshot. Stable across
+    /// releases: it is on disk.
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Mode::Off => 0,
+            Mode::Shadow => 1,
+            Mode::Active => 2,
+        }
+    }
+
+    /// The mode a snapshot byte stands for, or `None` for a byte written by a
+    /// version we do not know.
+    pub(crate) const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Mode::Off),
+            1 => Some(Mode::Shadow),
+            2 => Some(Mode::Active),
+            _ => None,
+        }
+    }
+}
+
+/// How much a stage cuts.
+///
+/// The universal intensity axis: every mechanism, free and Pro, has one, and
+/// the three names mean the same thing everywhere (`docs/CONFIG.md`).
+///
+/// - [`Level::Safe`] — only changes that cannot lose anything a human would
+///   want back.
+/// - [`Level::Balanced`] — the default once a mechanism is proven.
+/// - [`Level::Aggressive`] — maximum savings, still bound by loop safety.
+///
+/// # A level never turns a safety check off
+///
+/// This is the whole contract of the type, and it is a property every
+/// implementor owes, not a suggestion. A level changes **how much** a stage
+/// cuts; it never changes **whether** the checks run. At `Aggressive`, exactly
+/// as at `Safe`:
+///
+/// - error lines pass — `guard::errors_preserved` runs after every filter
+///   (invariant 2);
+/// - every cut leaves a handle (invariant 3);
+/// - a result with [`ToolResult::explicit_selection`] set is returned untouched
+///   (loop-safety 1) — ask [`crate::StageConfig::may_rewrite`], which gives the
+///   same answer at every level;
+/// - no mechanism forces a second tool call to get what one call used to
+///   return (loop-safety 4).
+///
+/// There is no variant, setting or config file that relaxes any of those. A
+/// mechanism that needed one would be a mechanism that does not ship.
+///
+/// The variants are ordered by intensity, so a stage can ask
+/// `level >= Level::Balanced` for a cut it only makes above `Safe`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
+pub enum Level {
+    /// Only changes that cannot lose anything a human would want back.
+    Safe,
+    /// The default once a mechanism is proven.
+    #[default]
+    Balanced,
+    /// Maximum savings, still bound by loop safety.
+    Aggressive,
+}
+
+impl Level {
+    /// Every level, weakest first. Iterated by the tests that check a property
+    /// holds at all of them.
+    pub const ALL: [Level; 3] = [Level::Safe, Level::Balanced, Level::Aggressive];
+
+    /// The name used in config, on the receipt and in the database.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Level::Safe => "safe",
+            Level::Balanced => "balanced",
+            Level::Aggressive => "aggressive",
+        }
+    }
+
+    /// Read a level from what a config file or an environment variable wrote.
+    /// `None` for anything else, which falls back to the layer below.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "safe" => Some(Level::Safe),
+            "balanced" => Some(Level::Balanced),
+            "aggressive" => Some(Level::Aggressive),
+            _ => None,
+        }
+    }
+
+    /// The byte that stands for this level in the snapshot. Stable across
+    /// releases: it is on disk.
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Level::Safe => 0,
+            Level::Balanced => 1,
+            Level::Aggressive => 2,
+        }
+    }
+
+    /// The level a snapshot byte stands for, or `None` for a byte written by a
+    /// version we do not know.
+    pub(crate) const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Level::Safe),
+            1 => Some(Level::Balanced),
+            2 => Some(Level::Aggressive),
+            _ => None,
+        }
+    }
 }
 
 /// The kind of tool call a result came from.
@@ -249,5 +372,80 @@ impl Saving {
     /// Bytes removed, saturating: a stage that grew the output saved nothing.
     pub const fn bytes_saved(&self) -> u64 {
         self.bytes_before.saturating_sub(self.bytes_after)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proven_mechanism_runs_balanced() {
+        assert_eq!(Level::default(), Level::Balanced);
+        assert_eq!(Mode::default(), Mode::Shadow);
+    }
+
+    #[test]
+    fn levels_are_ordered_by_intensity() {
+        assert!(Level::Safe < Level::Balanced);
+        assert!(Level::Balanced < Level::Aggressive);
+        assert_eq!(
+            Level::ALL,
+            [Level::Safe, Level::Balanced, Level::Aggressive]
+        );
+    }
+
+    #[test]
+    fn modes_and_levels_read_back_what_they_print() {
+        for mode in [Mode::Off, Mode::Shadow, Mode::Active] {
+            assert_eq!(Mode::parse(mode.as_str()), Some(mode));
+        }
+        for level in Level::ALL {
+            assert_eq!(Level::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(
+            Mode::parse("  OFF "),
+            Some(Mode::Off),
+            "as a shell writes it"
+        );
+        assert_eq!(Mode::parse("on"), Some(Mode::Active), "as `lessr on` means");
+        assert_eq!(Level::parse("Aggressive"), Some(Level::Aggressive));
+    }
+
+    #[test]
+    fn a_value_nobody_can_spell_is_not_guessed_at() {
+        assert_eq!(Mode::parse("aktive"), None);
+        assert_eq!(Mode::parse(""), None);
+        assert_eq!(Level::parse("maximum"), None);
+    }
+
+    #[test]
+    fn the_snapshot_tags_are_stable() {
+        // These bytes are on disk. Changing one changes what an old snapshot
+        // means, which is what the format version exists to prevent.
+        assert_eq!(
+            (Mode::Off.tag(), Mode::Shadow.tag(), Mode::Active.tag()),
+            (0, 1, 2)
+        );
+        assert_eq!(
+            (
+                Level::Safe.tag(),
+                Level::Balanced.tag(),
+                Level::Aggressive.tag()
+            ),
+            (0, 1, 2)
+        );
+        for mode in [Mode::Off, Mode::Shadow, Mode::Active] {
+            assert_eq!(Mode::from_tag(mode.tag()), Some(mode));
+        }
+        for level in Level::ALL {
+            assert_eq!(Level::from_tag(level.tag()), Some(level));
+        }
+        assert_eq!(
+            Mode::from_tag(9),
+            None,
+            "a tag from a version we do not have"
+        );
+        assert_eq!(Level::from_tag(9), None);
     }
 }

@@ -12,8 +12,10 @@
 //! gates on `[end_to_end]`; `[overhead]` stays the per-stage contract.
 //!
 //! It also asserts the hook contract from `docs/ADAPTERS.md` on every sample:
-//! exit 0, non-empty stdout. A hook that breaks the agent is a failure whatever
-//! its p99, so a bad invocation aborts the run instead of becoming a data point.
+//! exit 0, and stdout that is either empty — the signal for "nothing changed"
+//! — or JSON the agent can parse. A hook that breaks the agent is a failure
+//! whatever its p99, so a bad invocation aborts the run instead of becoming a
+//! data point.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -195,10 +197,17 @@ fn run_once(bin: &Path, payload: &[u8]) -> Result<Duration, String> {
             stderr_head(&output.stderr)
         ));
     }
-    if output.stdout.is_empty() {
+    // Empty stdout is correct, not a failure: it is how every agent we support
+    // is told "nothing changed, keep your own output". What must never happen
+    // is a non-empty body that is not the replacement envelope — Claude Code
+    // discards a malformed one in silence and uses the original, so a broken
+    // shape is indistinguishable from a working hook unless we check here.
+    if !output.stdout.is_empty()
+        && serde_json::from_slice::<serde_json::Value>(&output.stdout).is_err()
+    {
         return Err(format!(
-            "the hook wrote nothing to stdout; the contract is the tool-call JSON back\n  \
-             out, so an empty body loses the agent's tool result{}",
+            "the hook wrote something that is not JSON; agents parse this stream,\n  \
+             and anything they cannot parse is dropped in silence{}",
             stderr_head(&output.stderr)
         ));
     }

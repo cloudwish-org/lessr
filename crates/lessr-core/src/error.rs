@@ -34,4 +34,30 @@ pub enum Error {
     /// something is wrong with the input, not with the odds.
     #[error("handle store: cannot find a free id for this content")]
     HandleCollision,
+
+    /// The config snapshot could not be read, written or mapped.
+    #[error("config snapshot: {0}")]
+    Snapshot(#[source] std::io::Error),
+
+    /// The file does not begin with the snapshot magic, so it is not one. The
+    /// hook path treats this as "no configuration" and uses the defaults; it
+    /// never guesses at the bytes.
+    #[error("config snapshot: not a snapshot")]
+    SnapshotMagic,
+
+    /// The snapshot is in a format version this build does not know, which
+    /// usually means a newer Lessr wrote it. Reading it anyway would silently
+    /// change what a mechanism does, so it is refused.
+    #[error("config snapshot: format version {found}, expected {expected}")]
+    SnapshotVersion {
+        /// The version the file claims.
+        found: u16,
+        /// The version this build writes and accepts.
+        expected: u16,
+    },
+
+    /// The snapshot is the right format and still cannot be believed:
+    /// truncated, edited, or half-written.
+    #[error("config snapshot: {0}")]
+    SnapshotCorrupt(&'static str),
 }

@@ -37,10 +37,17 @@ const NO_GROUPS: &[Value] = &[];
 
 /// One agent's matcher-group layout.
 pub(crate) struct Layout {
-    /// The event key, e.g. `PreToolUse`.
+    /// The event key, e.g. `PostToolUse`.
     pub(crate) event: &'static str,
     /// The matcher for the group we add, when we have to add one.
     pub(crate) matcher: &'static str,
+    /// Whether an rtk hook in this same event should be chained behind.
+    ///
+    /// Only true where rtk and Lessr share an event. They do not in Claude
+    /// Code — rtk runs on `PreToolUse` and Lessr on `PostToolUse` — and a
+    /// group belongs to exactly one event, so putting Lessr in rtk's group
+    /// there would register it for the wrong event entirely.
+    pub(crate) chain_behind_rtk: bool,
 }
 
 /// What patching did, which is also what the user is told.
@@ -64,35 +71,47 @@ impl Layout {
     }
 
     /// Whether a Lessr hook, and whether an rtk hook, is already installed.
+    ///
+    /// Lessr is looked for in our own event, because that is where `init`
+    /// would have put it. rtk is looked for across every event: it installs on
+    /// the event *it* needs, which is not always ours, and
+    /// `lessr init --show` reports rtk wherever it is (`docs/ADAPTERS.md`).
     pub(crate) fn scan(&self, root: &Value) -> (bool, bool) {
-        let mut lessr = false;
-        let mut rtk = false;
-        for group in self.groups(root) {
-            lessr |= group_runs(group, &[LESSR]);
-            rtk |= group_runs(group, RTK);
-        }
+        let lessr = self
+            .groups(root)
+            .iter()
+            .any(|group| group_runs(group, &[LESSR]));
+        let rtk = all_groups(root).any(|group| group_runs(group, RTK));
         (lessr, rtk)
     }
 
     /// Add `entry`, in place.
     ///
-    /// rtk's own entry is never rewritten, only followed: rtk recognises its
-    /// hook by shell-splitting the command and matching three exact tokens, so
-    /// a wrapped or compound command reads to rtk as missing and its next
-    /// `init` adds a second copy of itself. Appending a separate entry to the
-    /// same list leaves rtk's bytes alone and still runs rtk first.
+    /// rtk's own entry is never rewritten, only worked around: rtk recognises
+    /// its hook by shell-splitting the command and matching three exact
+    /// tokens, so a wrapped or compound command reads to rtk as missing and
+    /// its next `init` adds a second copy of itself. Where we share rtk's
+    /// event, appending a separate entry to its list leaves rtk's bytes alone
+    /// and still runs rtk first; where we do not, we get a group of our own
+    /// and rtk is left entirely untouched.
     pub(crate) fn patch(&self, path: &Path, root: &mut Value, entry: Value) -> Result<Patch> {
         let groups = self.groups_mut(path, root)?;
         if groups.iter().any(|group| group_runs(group, &[LESSR])) {
             return Ok(Patch::AlreadyThere);
         }
 
-        if let Some(list) = groups
-            .iter_mut()
-            .find(|group| group_runs(group, RTK))
-            .and_then(|group| group.get_mut(HOOKS))
-            .and_then(Value::as_array_mut)
-        {
+        // Written without a let-chain: the workspace's `rust-version` is 1.85
+        // and those arrived in 1.88.
+        let rtk_list = if self.chain_behind_rtk {
+            groups
+                .iter_mut()
+                .find(|group| group_runs(group, RTK))
+                .and_then(|group| group.get_mut(HOOKS))
+                .and_then(Value::as_array_mut)
+        } else {
+            None
+        };
+        if let Some(list) = rtk_list {
             list.push(entry);
             return Ok(Patch::ChainedBehindRtk);
         }
@@ -172,6 +191,16 @@ impl Layout {
     }
 }
 
+/// Every matcher group in the config, whatever event it belongs to.
+fn all_groups(root: &Value) -> impl Iterator<Item = &Value> {
+    root.get(HOOKS)
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(serde_json::Map::values)
+        .filter_map(Value::as_array)
+        .flatten()
+}
+
 /// Whether any command in this matcher group runs one of `names`.
 fn group_runs(group: &Value, names: &[&str]) -> bool {
     group
@@ -232,6 +261,14 @@ mod tests {
     const LAYOUT: Layout = Layout {
         event: "PreToolUse",
         matcher: "Bash|Read",
+        chain_behind_rtk: true,
+    };
+
+    /// The same event, for an agent that does not share it with rtk.
+    const ALONE: Layout = Layout {
+        event: "PreToolUse",
+        matcher: "Bash|Read",
+        chain_behind_rtk: false,
     };
 
     fn entry() -> Value {
@@ -245,6 +282,37 @@ mod tests {
         assert!(mentions("lessr hook claude", LESSR));
         assert!(!mentions("/home/mrtk/bin/tool", "rtk"));
         assert!(!mentions("blessrunner --go", LESSR));
+    }
+
+    #[test]
+    fn rtk_is_found_in_whatever_event_it_installed_itself_on() {
+        // rtk on one event, us on another: it is still there, and
+        // `lessr init --show` has to say so.
+        let root = json!({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+        ]}});
+        let elsewhere = Layout {
+            event: "PostToolUse",
+            matcher: "Bash",
+            chain_behind_rtk: false,
+        };
+        assert_eq!(elsewhere.scan(&root), (false, true));
+    }
+
+    #[test]
+    fn an_adapter_that_does_not_share_rtks_event_gets_its_own_group() {
+        let mut root = json!({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+        ]}});
+        assert_eq!(
+            ALONE.patch(Path::new("x"), &mut root, entry()).unwrap(),
+            Patch::Added
+        );
+
+        let groups = ALONE.groups(&root);
+        assert_eq!(groups.len(), 2, "beside rtk, never inside it");
+        assert_eq!(groups[0]["hooks"][0]["command"], "rtk hook claude");
+        assert_eq!(groups[1]["hooks"].as_array().unwrap().len(), 1);
     }
 
     #[test]

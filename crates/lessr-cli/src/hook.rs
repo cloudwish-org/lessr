@@ -47,10 +47,22 @@ fn filtered(agent: &str, input: &[u8], pipeline: &mut Pipeline) -> Option<Vec<u8
     let mut payload = lessr_adapters::parse_hook_input(agent, input).ok()?;
 
     // A payload with no tool result — a pre-tool-use event, say — has nothing
-    // for the pipeline to do. Rendering it back unchanged is correct, not a
-    // failure.
+    // for the pipeline to do, and that is not a failure.
+    let before = payload.result().map(|result| result.content.clone());
     if let Some(result) = payload.result_mut() {
         pipeline.run_tool_result(result);
+    }
+
+    // Only claim a rewrite when there is one. An agent that is handed an
+    // envelope full of its own unchanged output has paid a parse for nothing,
+    // and on Claude Code a replacement that fails its schema check is ignored
+    // in silence — so an unnecessary envelope is a risk as well as a waste.
+    let changed = match (before, payload.result()) {
+        (Some(before), Some(after)) => before != after.content,
+        _ => false,
+    };
+    if !changed {
+        return Some(lessr_adapters::render_hook_unchanged(agent, input));
     }
 
     lessr_adapters::render_hook_output(agent, &payload).ok()
@@ -59,10 +71,40 @@ fn filtered(agent: &str, input: &[u8], pipeline: &mut Pipeline) -> Option<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lessr_core::PipelineBuilder;
+    use lessr_core::{PipelineBuilder, Saving};
 
     fn empty_pipeline() -> Pipeline {
         PipelineBuilder::new().build()
+    }
+
+    /// Replaces whatever it is given, so the envelope has something to carry.
+    struct Shouty;
+
+    impl lessr_core::Stage for Shouty {
+        fn name(&self) -> &'static str {
+            "shouty"
+        }
+        fn tier(&self) -> lessr_core::Tier {
+            lessr_core::Tier::Free
+        }
+        fn on_tool_result(&mut self, result: &mut lessr_core::ToolResult) -> Option<Saving> {
+            let before = result.content.len() as u64;
+            result.content = bytes::Bytes::from_static(b"REPLACED");
+            let after = result.content.len() as u64;
+            Some(Saving::bytes(
+                before,
+                after,
+                lessr_core::Tokens::Exact(before.saturating_sub(after)),
+            ))
+        }
+    }
+
+    fn shouty_pipeline() -> Pipeline {
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register(Shouty, lessr_core::Mode::Active)
+            .expect("one stage cannot clash");
+        builder.build()
     }
 
     fn fixture(name: &str) -> Vec<u8> {
@@ -93,27 +135,52 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_tool_use_payload_comes_back_with_its_tool_call_intact() {
+    fn a_pre_tool_use_payload_has_nothing_to_filter() {
+        // It fires before the tool runs, so there is no output to shrink.
+        // Silence leaves the agent's own behaviour exactly as it was.
         let input = fixture("claude_pre_tool_use.json");
         let out = filter_bytes("claude", &input, &mut empty_pipeline());
-
-        let parsed: serde_json::Value = serde_json::from_slice(&out).expect("still valid JSON");
-        assert_eq!(parsed["tool_name"], "Bash");
-        assert_eq!(parsed["tool_input"]["command"], "cargo test --workspace");
+        assert!(
+            out.is_empty(),
+            "expected silence, got {}",
+            String::from_utf8_lossy(&out)
+        );
     }
 
     #[test]
-    fn an_empty_pipeline_returns_the_tool_output_byte_for_byte() {
+    fn nothing_changed_means_nothing_printed() {
+        // Silence is the "no change" signal. The agent keeps the original
+        // output, and we have not spent a byte of anyone's context saying so.
         let input = fixture("claude_post_tool_use.json");
-        let before: serde_json::Value = serde_json::from_slice(&input).unwrap();
-
         let out = filter_bytes("claude", &input, &mut empty_pipeline());
-        let after: serde_json::Value = serde_json::from_slice(&out).expect("still valid JSON");
-
-        assert_eq!(
-            before["tool_response"]["stdout"], after["tool_response"]["stdout"],
-            "with no stages registered the gate must be invisible"
+        assert!(
+            out.is_empty(),
+            "an empty pipeline must be invisible, got {}",
+            String::from_utf8_lossy(&out)
         );
+    }
+
+    #[test]
+    fn a_stage_that_rewrites_reaches_the_agent_in_its_own_envelope() {
+        // The end-to-end proof: a saving is worthless if the replacement never
+        // reaches the agent, and Claude Code ignores a malformed envelope in
+        // silence, so a wrong shape here looks exactly like success.
+        let input = fixture("claude_post_tool_use.json");
+        let out = filter_bytes("claude", &input, &mut shouty_pipeline());
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&out).expect("a rewrite must produce JSON");
+        let specific = &parsed["hookSpecificOutput"];
+        assert_eq!(specific["hookEventName"], "PostToolUse");
+        assert_eq!(
+            specific["updatedToolOutput"]["stdout"], "REPLACED",
+            "the filtered text must be what the agent is handed"
+        );
+        // The rest of the tool's output object has to survive, or Claude Code
+        // rejects the whole thing and uses the original.
+        assert_eq!(specific["updatedToolOutput"]["stderr"], "");
+        assert_eq!(specific["updatedToolOutput"]["interrupted"], false);
+        assert_eq!(specific["updatedToolOutput"]["isImage"], false);
     }
 
     #[test]
@@ -121,7 +188,8 @@ mod tests {
         // Hook output is billed to the user on every later turn. This is the
         // structural guarantee behind that rule; see `crate::pro`.
         let input = fixture("claude_post_tool_use.json");
-        let out = filter_bytes("claude", &input, &mut empty_pipeline());
+        let out = filter_bytes("claude", &input, &mut shouty_pipeline());
+        assert!(!out.is_empty(), "test would be vacuous against no output");
         let text = String::from_utf8_lossy(&out).to_lowercase();
         for marketing in ["lessr.dev", "upgrade", "pro ", "left on the table"] {
             assert!(

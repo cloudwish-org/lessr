@@ -67,19 +67,19 @@ fn version_and_help_work() {
 }
 
 #[test]
-fn the_hook_returns_its_input_and_exits_zero_when_no_stage_is_registered() {
+fn the_hook_is_completely_silent_when_no_stage_is_registered() {
+    // The free binary registers no stages yet, so the hook must be invisible:
+    // exit 0 and not one byte on stdout. Silence is how every agent we support
+    // is told "leave the output alone".
     let home = sandbox();
     let input = fixture("claude_post_tool_use.json");
     let out = run(home.path(), &["hook", "claude"], Some(&input));
 
     assert!(out.status.success(), "the hook must never fail the agent");
-
-    let before: serde_json::Value = serde_json::from_slice(&input).unwrap();
-    let after: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("hook stdout must be JSON");
-    assert_eq!(
-        before["tool_response"]["stdout"], after["tool_response"]["stdout"],
-        "an empty pipeline must be invisible"
+    assert!(
+        out.stdout.is_empty(),
+        "expected silence, got {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 
@@ -117,21 +117,18 @@ fn an_unknown_agent_still_exits_zero() {
 }
 
 #[test]
-fn the_hook_writes_nothing_but_the_payload_to_stdout() {
+fn the_hook_never_writes_anything_of_its_own_to_stdout() {
     // Everything on this stream enters the agent's context and is billed on
-    // every later turn. A stray log line is a real cost, not untidiness.
+    // every later turn, so the only thing allowed here is a replacement the
+    // agent asked for. Never a log line, never a word about Pro.
     let home = sandbox();
-    let input = fixture("claude_post_tool_use.json");
-    let out = run(home.path(), &["hook", "claude"], Some(&input));
-
-    serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        .expect("stdout must be exactly one JSON document and nothing else");
-
-    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
-    for marketing in ["lessr.dev", "upgrade", "left on the table"] {
+    for fixture_name in ["claude_post_tool_use.json", "claude_pre_tool_use.json"] {
+        let input = fixture(fixture_name);
+        let out = run(home.path(), &["hook", "claude"], Some(&input));
         assert!(
-            !text.contains(marketing),
-            "hook stdout contains {marketing:?}"
+            out.stdout.is_empty(),
+            "{fixture_name}: {}",
+            String::from_utf8_lossy(&out.stdout)
         );
     }
 }
@@ -373,7 +370,7 @@ fn the_installed_hook_command_survives_a_path_with_a_space() {
 
     let settings = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
-    let command = parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    let command = parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .expect("a hook command was written");
     assert!(

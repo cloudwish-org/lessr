@@ -42,6 +42,6 @@ mod plan;
 pub use agent::AgentId;
 pub use detect::{Detected, detect};
 pub use error::{Error, Result};
-pub use hook::{HookPayload, parse_hook_input, render_hook_output};
+pub use hook::{HookPayload, parse_hook_input, render_hook_output, render_hook_unchanged};
 pub use paths::Paths;
 pub use plan::{Applied, Change, Plan, apply, plan_init, plan_uninstall};

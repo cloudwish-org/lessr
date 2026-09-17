@@ -13,7 +13,7 @@
 /// compiler names every place that still owes an answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentId {
-    /// Claude Code: a `PreToolUse` hook in `~/.claude/settings.json`.
+    /// Claude Code: a `PostToolUse` hook in `~/.claude/settings.json`.
     ClaudeCode,
     /// Cursor.
     Cursor,

@@ -1,19 +1,43 @@
 //! Claude Code. Confidence: verified.
 //!
-//! Config: `~/.claude/settings.json`. Mechanism: a `PreToolUse` hook, exactly
-//! as `docs/ADAPTERS.md` specifies:
+//! Config: `~/.claude/settings.json`. Mechanism: a `PostToolUse` hook —
+//! `PreToolUse` runs before the tool does and its payload carries no output, so
+//! there is nothing to filter there:
 //!
 //! ```json
-//! {"hooks": {"PreToolUse": [{"matcher": "Bash|Read|Glob|Grep",
+//! {"hooks": {"PostToolUse": [{"matcher": "Bash",
 //!  "hooks": [{"type": "command", "command": "lessr hook claude"}]}]}}
 //! ```
 //!
 //! The file is the user's, not ours: it is parsed with key order preserved, the
 //! one entry is added, and everything else is written back exactly as it came
-//! in. An existing `rtk` hook is chained behind, never rewritten.
+//! in. An existing `rtk` hook is reported and left alone — rtk installs on
+//! `PreToolUse`, so it is not even in the same list.
 //!
-//! On the hook path Claude Code's contract is the plain one: the same JSON
-//! back, with `tool_response.stdout` replaced.
+//! **The output contract is not an echo.** Claude Code replaces a tool result
+//! only when stdout is
+//!
+//! ```json
+//! {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+//!  "updatedToolOutput": {"stdout": "…", "stderr": "", "interrupted": false,
+//!                        "isImage": false}}}
+//! ```
+//!
+//! (`updatedToolOutput` covers every tool, from Claude Code 2.1.121; the older
+//! `updatedMCPToolOutput` is MCP-only and is not used here.) Anything else —
+//! the payload echoed back, a `decision`/`reason` pair, a non-zero exit — is
+//! read as "no replacement" and the original output is used. The failure is
+//! silent, which is why two things here are deliberately narrow:
+//!
+//! * The whole `tool_response` object is round-tripped with only its text
+//!   replaced, never rebuilt from scratch: "a value that doesn't match the
+//!   tool's output schema is ignored and the original output is used".
+//! * The matcher is `Bash` alone, whose shape is the one we have a real payload
+//!   for (`fixtures/hook/claude_post_tool_use.json`). Trap and dedup want
+//!   `Read` as well; widening the matcher is blocked on capturing a real `Read`
+//!   payload to learn its output shape, not on writing more code here.
+//!
+//! With nothing to say, this hook prints nothing at all and exits 0.
 
 use std::path::{Path, PathBuf};
 
@@ -26,9 +50,9 @@ use crate::agents::matcher_groups::{Layout, Patch};
 use crate::agents::{Adapter, Confidence};
 use crate::backup;
 use crate::detect::Detected;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::file;
-use crate::hook::{Parsed, Slot, first_slot};
+use crate::hook::{Parsed, Slot};
 use crate::paths::Paths;
 use crate::plan::{Change, Plan};
 
@@ -43,19 +67,21 @@ const SETTINGS: &str = ".claude/settings.json";
 
 /// The event, and the matcher for the group we add.
 ///
-/// The four tools whose output is worth filtering are the four the free stages
-/// know how to shrink; anything else would pay a process spawn for nothing.
+/// `Bash` only, for now: see the module docs. rtk lives on `PreToolUse`, a
+/// different list entirely, so there is nothing here to chain behind.
 const LAYOUT: Layout = Layout {
-    event: "PreToolUse",
-    matcher: "Bash|Read|Glob|Grep",
+    event: "PostToolUse",
+    matcher: "Bash",
+    chain_behind_rtk: false,
 };
 
-/// Where the filterable text lives in a `PostToolUse` payload: `stdout` when
-/// the response is an object, the response itself when it is a plain string.
-const CONTENT: &[Slot] = &[
-    Slot::at(&["tool_response", "stdout"]),
-    Slot::at(&["tool_response"]),
-];
+/// Where the filterable text lives in a `PostToolUse` payload.
+///
+/// One path and no fallbacks. A `tool_response` that is a plain string is
+/// readable, but we could not put it back: `updatedToolOutput` has to match the
+/// tool's own output schema or it is ignored without a word. Anything we cannot
+/// write back is something we do not claim to have filtered.
+const CONTENT: Slot = Slot::at(&["tool_response", "stdout"]);
 
 impl Adapter for ClaudeCode {
     fn id(&self) -> AgentId {
@@ -173,6 +199,40 @@ impl Adapter for ClaudeCode {
     fn parse_hook(&self, root: &Value) -> Result<Option<Parsed>> {
         Ok(read_payload(root))
     }
+
+    /// The whole `Output` object goes back with only its text replaced.
+    ///
+    /// Claude Code ignores an `updatedToolOutput` that does not match the
+    /// tool's own output schema, and ignores it silently — so a minimal object
+    /// we had synthesised would look exactly like success while changing
+    /// nothing. Round-tripping keeps every key it had, and its type.
+    fn render_hook(&self, root: &Value, slot: Slot, content: &str) -> Result<Vec<u8>> {
+        let mut patched = root.clone();
+        slot.put(&mut patched, content);
+
+        let output = patched
+            .get("tool_response")
+            .filter(|value| value.is_object());
+        let Some(output) = output else {
+            // A shape we cannot vouch for. Saying nothing leaves the agent
+            // with the tool's own output, which is the safe answer.
+            return Ok(Vec::new());
+        };
+        let envelope = json!({
+            "hookSpecificOutput": {
+                "hookEventName": LAYOUT.event,
+                "updatedToolOutput": output.clone(),
+            }
+        });
+        serde_json::to_vec(&envelope).map_err(Error::HookJson)
+    }
+
+    /// Nothing to replace, so nothing is printed. An echoed payload would be
+    /// parsed, found to carry no field Claude Code recognises, and silently
+    /// ignored — the same outcome, said at more length.
+    fn render_unchanged(&self, _raw: &[u8]) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 /// `~/.claude/settings.json`.
@@ -185,18 +245,23 @@ fn summary(outcome: Patch, hook_command: &str) -> String {
     match outcome {
         Patch::AlreadyThere => String::from("nothing to add"),
         Patch::ChainedBehindRtk => format!("chain `{hook_command}` behind the existing rtk hook"),
-        Patch::Added => format!("run `{hook_command}` before {} tools", LAYOUT.matcher),
+        Patch::Added => format!("run `{hook_command}` after {} tools", LAYOUT.matcher),
     }
 }
 
 /// Read a hook payload into something a stage can filter.
 ///
 /// Claude Code sends `hook_event_name`, `tool_name`, `tool_input`, and on
-/// `PostToolUse` also `tool_response`. We key off `tool_response` rather than
-/// the event name: no response means nothing has run yet, and there is nothing
-/// to filter whatever the event is called.
+/// `PostToolUse` also `tool_response`. Both have to line up: an event other
+/// than ours cannot take an `updatedToolOutput`, and no `tool_response` means
+/// nothing has run yet. A payload that fails either test is not an error, it
+/// is a call we leave alone.
 fn read_payload(root: &Value) -> Option<Parsed> {
-    let (slot, text) = first_slot(root, CONTENT)?;
+    let event = root.get("hook_event_name").and_then(Value::as_str);
+    if event.is_some_and(|name| name != LAYOUT.event) {
+        return None;
+    }
+    let text = CONTENT.get(root)?;
 
     let tool_name = root.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let tool = tool_kind(tool_name);
@@ -221,11 +286,17 @@ fn read_payload(root: &Value) -> Option<Parsed> {
             explicit_selection: explicit_selection(tool, input),
             content: Bytes::copy_from_slice(text.as_bytes()),
         },
-        slot,
+        CONTENT,
     ))
 }
 
 /// Claude Code's tool names, mapped to the kinds stages match on.
+///
+/// The matcher only asks to be called for `Bash` today (see the module docs),
+/// so the other arms are unexercised in production. They stay because widening
+/// the matcher is a one-line change once a real `Read` payload tells us the
+/// shape of its output, and because a payload arriving from a hand-edited
+/// settings file should still be read correctly rather than guessed at.
 fn tool_kind(tool_name: &str) -> ToolKind {
     match tool_name {
         "Bash" => ToolKind::Shell,
@@ -360,7 +431,7 @@ mod tests {
         apply(&plan).unwrap();
 
         let written: Value = serde_json::from_str(&settings(&paths)).unwrap();
-        let entry = &written["hooks"]["PreToolUse"][0];
+        let entry = &written["hooks"]["PostToolUse"][0];
         assert_eq!(entry["matcher"], LAYOUT.matcher);
         assert_eq!(entry["hooks"][0]["type"], "command");
         assert_eq!(entry["hooks"][0]["command"], HOOK);
@@ -421,11 +492,9 @@ mod tests {
     }
 
     #[test]
-    fn an_rtk_hook_is_chained_not_replaced() {
+    fn an_rtk_hook_is_reported_and_left_where_it_is() {
         let (_tmp, paths) = setup();
-        write_settings(
-            &paths,
-            r#"{
+        let rtk_entry = r#"{
   "hooks": {
     "PreToolUse": [
       {
@@ -437,26 +506,40 @@ mod tests {
     ]
   }
 }
-"#,
-        );
+"#;
+        write_settings(&paths, rtk_entry);
 
-        let plan = init(&paths);
-        assert!(plan.render().contains("chain"), "{}", plan.render());
-        apply(&plan).unwrap();
+        // rtk hooks PreToolUse and we hook PostToolUse, so there is nothing to
+        // chain behind: our entry goes in a list of its own and rtk's keeps
+        // every byte it had.
+        apply(&init(&paths)).unwrap();
 
         let written: Value = serde_json::from_str(&settings(&paths)).unwrap();
-        let groups = written["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(groups.len(), 1, "chained inside rtk's group, not beside it");
-        assert_eq!(groups[0]["matcher"], "Bash", "rtk's matcher is left alone");
+        let rtk_groups = written["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(rtk_groups.len(), 1);
+        assert_eq!(rtk_groups[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            rtk_groups[0]["hooks"][0]["command"],
+            "/opt/homebrew/bin/rtk hook claude"
+        );
 
-        let chain = groups[0]["hooks"].as_array().unwrap();
-        assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0]["command"], "/opt/homebrew/bin/rtk hook claude");
-        assert_eq!(chain[1]["command"], HOOK, "rtk first, then Lessr");
+        let ours = written["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0]["hooks"][0]["command"], HOOK);
 
         let found = ADAPTER.detect(&paths);
-        assert!(found.rtk_present);
+        assert!(
+            found.rtk_present,
+            "rtk is still reported from another event"
+        );
         assert!(found.already_patched);
+
+        // And uninstalling puts the file back exactly as rtk left it.
+        apply(&crate::plan_uninstall(&paths, AgentId::ClaudeCode).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read(settings_path(&paths)).unwrap(),
+            rtk_entry.as_bytes()
+        );
     }
 
     #[test]
@@ -502,13 +585,11 @@ mod tests {
             r#"{
   "hooks": {
     "PreToolUse": [
-      {"matcher": "Bash", "hooks": [
-        {"type": "command", "command": "rtk hook claude"},
-        {"type": "command", "command": "lessr hook claude"}
-      ]}
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
     ],
     "PostToolUse": [
-      {"matcher": "Edit", "hooks": [{"type": "command", "command": "prettier"}]}
+      {"matcher": "Edit", "hooks": [{"type": "command", "command": "prettier"}]},
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "lessr hook claude"}]}
     ]
   }
 }
@@ -518,15 +599,13 @@ mod tests {
         apply(&uninstall(&paths)).unwrap();
 
         let written: Value = serde_json::from_str(&settings(&paths)).unwrap();
-        let chain = written["hooks"]["PreToolUse"][0]["hooks"]
-            .as_array()
-            .unwrap();
-        assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0]["command"], "rtk hook claude");
         assert_eq!(
-            written["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
-            "prettier"
+            written["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "rtk hook claude"
         );
+        let post = written["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1, "our group went, the formatter's stayed");
+        assert_eq!(post[0]["hooks"][0]["command"], "prettier");
     }
 
     #[test]
@@ -562,9 +641,9 @@ mod tests {
         let err = crate::plan_init(&paths, AgentId::ClaudeCode, HOOK).unwrap_err();
         assert!(err.to_string().contains("not a JSON object"), "{err}");
 
-        write_settings(&paths, "{\"hooks\": {\"PreToolUse\": {}}}");
+        write_settings(&paths, "{\"hooks\": {\"PostToolUse\": {}}}");
         let err = crate::plan_init(&paths, AgentId::ClaudeCode, HOOK).unwrap_err();
-        assert!(err.to_string().contains("PreToolUse"), "{err}");
+        assert!(err.to_string().contains("PostToolUse"), "{err}");
     }
 
     #[test]
@@ -601,12 +680,35 @@ mod tests {
         let input = fixture("claude_pre_tool_use.json");
         let payload = parse_hook_input(AgentId::ClaudeCode, &input).unwrap();
 
-        assert!(payload.result().is_none(), "no tool_response yet");
-        assert_eq!(
-            render_hook_output(AgentId::ClaudeCode, &payload).unwrap(),
-            input,
-            "a PreToolUse payload goes back exactly as it arrived"
+        assert!(payload.result().is_none(), "the tool has not run yet");
+        assert!(
+            render_hook_output(AgentId::ClaudeCode, &payload)
+                .unwrap()
+                .is_empty(),
+            "nothing to replace, so nothing is printed"
         );
+    }
+
+    #[test]
+    fn the_event_we_install_on_is_the_event_we_can_filter() {
+        // Derived from the fixtures rather than written down twice: whichever
+        // payload the parser can take a result from, that payload's event is
+        // the event `lessr init` has to register for. Getting this wrong is
+        // silent in production — a hook on the wrong event simply never has
+        // anything to do.
+        let mut filterable = Vec::new();
+        for name in ["claude_pre_tool_use.json", "claude_post_tool_use.json"] {
+            let raw = fixture(name);
+            if parse_hook_input(AgentId::ClaudeCode, &raw)
+                .unwrap()
+                .result()
+                .is_some()
+            {
+                let json: Value = serde_json::from_slice(&raw).unwrap();
+                filterable.push(json["hook_event_name"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(filterable, vec![LAYOUT.event.to_string()]);
     }
 
     #[test]
@@ -633,39 +735,57 @@ mod tests {
     }
 
     #[test]
-    fn a_rewritten_result_goes_back_into_the_response() {
+    fn a_rewritten_result_is_printed_in_the_envelope_the_docs_document() {
         let mut payload =
             parse_hook_input(AgentId::ClaudeCode, &fixture("claude_post_tool_use.json")).unwrap();
         payload.result_mut().unwrap().content = Bytes::from_static(b"test result: ok. 3 passed\n");
 
         let out = render_hook_output(AgentId::ClaudeCode, &payload).unwrap();
-        let written: Value = serde_json::from_slice(&out).unwrap();
 
+        // The exact document from the hooks reference, byte for byte: the
+        // whole Output object with only its text replaced, wrapped in
+        // `hookSpecificOutput`. Anything else is ignored in silence.
         assert_eq!(
-            written["tool_response"]["stdout"],
-            "test result: ok. 3 passed\n"
+            String::from_utf8(out).unwrap(),
+            concat!(
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","#,
+                r#""updatedToolOutput":{"stdout":"test result: ok. 3 passed\n","#,
+                r#""stderr":"","interrupted":false,"isImage":false}}}"#,
+            )
         );
-        assert_eq!(
-            written["tool_response"]["stderr"], "",
-            "the rest is untouched"
-        );
-        assert_eq!(written["tool_response"]["interrupted"], false);
-        assert_eq!(written["tool_name"], "Bash");
-        assert_eq!(written["tool_input"]["command"], "cargo test --workspace");
-        assert_eq!(written["hook_event_name"], "PostToolUse");
     }
 
     #[test]
-    fn a_response_that_is_just_a_string_is_filterable_too() {
-        let input =
-            br#"{"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": "a\nb\n"}"#;
+    fn every_key_of_the_output_object_survives_with_its_type() {
+        let input = br#"{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": "long\n", "stderr": "warn\n", "interrupted": false, "isImage": false, "extra": {"n": 1}}}"#;
         let mut payload = parse_hook_input(AgentId::ClaudeCode, input).unwrap();
-        assert_eq!(payload.result().unwrap().content.as_ref(), b"a\nb\n");
+        payload.result_mut().unwrap().content = Bytes::from_static(b"short\n");
 
-        payload.result_mut().unwrap().content = Bytes::from_static(b"a\n");
         let out = render_hook_output(AgentId::ClaudeCode, &payload).unwrap();
         let written: Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(written["tool_response"], "a\n");
+        let output = &written["hookSpecificOutput"]["updatedToolOutput"];
+
+        assert_eq!(output["stdout"], "short\n");
+        assert_eq!(output["stderr"], "warn\n", "not ours to touch");
+        assert_eq!(output["interrupted"], false, "still a bool, not a string");
+        assert_eq!(output["isImage"], false);
+        assert_eq!(output["extra"]["n"], 1, "a key we have never heard of");
+    }
+
+    #[test]
+    fn a_response_that_is_just_a_string_is_left_alone() {
+        // Readable, but there is no `updatedToolOutput` shape we could vouch
+        // for, and a wrong one is ignored without a word. So we do not claim
+        // to have filtered it.
+        let input =
+            br#"{"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": "a\nb\n"}"#;
+        let payload = parse_hook_input(AgentId::ClaudeCode, input).unwrap();
+        assert!(payload.result().is_none());
+        assert!(
+            render_hook_output(AgentId::ClaudeCode, &payload)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -673,10 +793,21 @@ mod tests {
         let input = br#"{"tool_name": "Read", "tool_response": {"file": {"content": "x"}}}"#;
         let payload = parse_hook_input(AgentId::ClaudeCode, input).unwrap();
         assert!(payload.result().is_none());
-        assert_eq!(
-            render_hook_output(AgentId::ClaudeCode, &payload).unwrap(),
-            input.to_vec()
+        assert!(
+            render_hook_output(AgentId::ClaudeCode, &payload)
+                .unwrap()
+                .is_empty()
         );
+    }
+
+    #[test]
+    fn a_payload_from_another_event_is_not_ours_to_change() {
+        // Belt and braces against the bug this adapter already had once: a
+        // `tool_response` on an event that cannot take an `updatedToolOutput`
+        // is not something to filter.
+        let input = br#"{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_response": {"stdout": "x"}}"#;
+        let payload = parse_hook_input(AgentId::ClaudeCode, input).unwrap();
+        assert!(payload.result().is_none());
     }
 
     #[test]
