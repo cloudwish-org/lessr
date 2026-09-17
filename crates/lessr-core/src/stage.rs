@@ -1,12 +1,15 @@
 //! The `Stage` trait: one mechanism, one crate, one implementation of this.
 
+use crate::config::StageConfig;
 use crate::types::{Request, Saving, Tier, ToolResult, Usage};
 
 /// A mechanism.
 ///
 /// Each hook is optional; a stage implements only the paths it runs on. The
 /// pipeline decides whether a stage runs at all (its [`crate::Mode`]) and
-/// enforces the [`crate::Budget`], so implementations never check either.
+/// enforces the [`crate::Budget`], so implementations never check either. What
+/// a stage does decide — how hard it cuts, and with which thresholds — reaches
+/// it through [`Stage::configure`].
 ///
 /// Returning `Some(Saving)` claims a saving. Do not claim one without a
 /// counting rule in `docs/MECHANISMS.md`: no rule, no line on the receipt.
@@ -17,6 +20,29 @@ pub trait Stage: Send + Sync {
 
     /// Free or Pro. Used to split the receipt.
     fn tier(&self) -> Tier;
+
+    /// Take the configuration this stage runs with.
+    ///
+    /// Defaulted, because a stage with nothing to tune has nothing to take:
+    /// the gate reads three thresholds here, `detect` reads none, and neither
+    /// has to say so.
+    ///
+    /// Called once at registration, and **again on a pipeline that is already
+    /// running**: the kill switch, `lessr level <stage> <level>` and the
+    /// self-healing table all reconfigure live stages (`docs/CONFIG.md`). So
+    /// an implementation must be idempotent — derive everything it keeps from
+    /// `config` alone, and never add to what the previous call left behind.
+    ///
+    /// `config` is borrowed for the call only, so copy out what is needed:
+    /// [`crate::Level`] is `Copy` and the [`crate::Settings`] accessors take
+    /// the stage's own default at the call site. Copying here is also what
+    /// keeps the hook path off the settings map, which it may not search once
+    /// per tool call (`docs/PERFORMANCE.md`).
+    ///
+    /// A level says how much to cut, never whether a check runs. Reading
+    /// `config.level` to skip the error guard, a handle write or
+    /// [`StageConfig::may_rewrite`] is a bug, not a level.
+    fn configure(&mut self, _config: &StageConfig) {}
 
     /// Hook path. Rewrite a tool result before it enters the agent's context.
     ///

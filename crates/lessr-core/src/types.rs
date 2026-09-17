@@ -324,9 +324,9 @@ impl Tokens {
 
 /// What one stage saved on one call.
 ///
-/// Stages build these; the pipeline stamps the stage name, tier and mode before
-/// handing them back, so the receipt cannot disagree with the pipeline about
-/// who did what.
+/// Stages build these; the pipeline stamps the stage name, tier, mode and level
+/// before handing them back, so the receipt cannot disagree with the pipeline
+/// about who did what.
 #[derive(Clone, Debug)]
 pub struct Saving {
     /// The stage that produced it. Stamped by the pipeline.
@@ -336,6 +336,11 @@ pub struct Saving {
     /// The mode it ran in. Stamped by the pipeline; `Shadow` means this saving
     /// was counted but not applied.
     pub mode: Mode,
+    /// The level it ran at. Stamped by the pipeline, which is what makes a
+    /// level measurable instead of asserted: the receipt can say the gate saved
+    /// this much at `balanced`, and the self-healing table can tell one level's
+    /// expand rate from another's before it turns a filter off.
+    pub level: Level,
     /// Content size before the stage.
     pub bytes_before: u64,
     /// Content size after the stage.
@@ -349,13 +354,14 @@ pub struct Saving {
 
 impl Saving {
     /// A saving of `before - after` bytes, with the token count supplied by the
-    /// caller. The stage, tier and mode are placeholders until the pipeline
-    /// stamps them.
+    /// caller. The stage, tier, mode and level are placeholders until the
+    /// pipeline stamps them.
     pub fn bytes(before: u64, after: u64, tokens: Tokens) -> Self {
         Self {
             stage: "",
             tier: Tier::Free,
             mode: Mode::Shadow,
+            level: Level::Balanced,
             bytes_before: before,
             bytes_after: after,
             tokens,

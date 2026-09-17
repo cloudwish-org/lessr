@@ -3,14 +3,15 @@
 //! Stage: none — this crate defines the trait the mechanisms implement.
 //! Path: both (hook and proxy).
 //! Counting rule: none of its own; it carries [`Saving`] values the stages
-//! produce and stamps them with the stage name, tier and mode so a stage
-//! cannot misreport its own accounting.
+//! produce and stamps them with the stage name, tier, mode and level so a
+//! stage cannot misreport its own accounting.
 //!
 //! It also owns the configuration model every mechanism is tuned through —
-//! [`Mode`], [`Level`] and [`Settings`], layered by [`Config`] and compiled
-//! into the binary [`Snapshot`] the hook path maps. Reading `config.toml` is
-//! the CLI's job; this crate never sees a TOML parser, which is what keeps one
-//! off the path that runs per tool call.
+//! [`Mode`], [`Level`] and [`Settings`], layered by [`Config`], compiled into
+//! the binary [`Snapshot`] the hook path maps, and delivered to a stage as a
+//! [`StageConfig`] through [`Stage::configure`]. Reading `config.toml` is the
+//! CLI's job; this crate never sees a TOML parser, which is what keeps one off
+//! the path that runs per tool call.
 //!
 //! This crate depends on nothing else in the workspace and performs no I/O on
 //! the hot path: the snapshot is mapped once at startup and read from there

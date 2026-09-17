@@ -1,8 +1,10 @@
-//! The pipeline: an ordered list of stages, each with a mode and a budget.
+//! The pipeline: an ordered list of stages, each with a configuration and a
+//! budget.
 
 use std::time::Instant;
 
 use crate::budget::{Budget, Verdict};
+use crate::config::StageConfig;
 use crate::error::{Error, Result};
 use crate::stage::{Position, Stage};
 use crate::types::{Mode, Request, Saving, Tier, ToolResult, Usage};
@@ -13,7 +15,10 @@ struct Registered {
     /// Cached so we can read it without touching the trait object.
     name: &'static str,
     tier: Tier,
-    mode: Mode,
+    /// The whole configuration, not just the mode: the level is stamped onto
+    /// every [`Saving`] the stage produces, and `lessr config --explain` reads
+    /// the settings back out of the pipeline that is actually running.
+    config: StageConfig,
     budget: Budget,
     /// Set when the stage blew the hard budget. It is skipped for the rest of
     /// the session; the budget is a contract.
@@ -50,17 +55,41 @@ impl PipelineBuilder {
         Self::default()
     }
 
-    /// Append a stage.
+    /// Append a stage with only its mode set: the compiled-in level, and no
+    /// settings.
     pub fn register<S: Stage + 'static>(&mut self, stage: S, mode: Mode) -> Result<&mut Self> {
         self.register_at(Position::Last, stage, mode)
     }
 
-    /// Insert a stage at a position relative to the stages already registered.
+    /// Insert a stage at a position relative to the stages already registered,
+    /// with only its mode set.
     pub fn register_at<S: Stage + 'static>(
         &mut self,
         position: Position,
         stage: S,
         mode: Mode,
+    ) -> Result<&mut Self> {
+        self.register_with(
+            position,
+            stage,
+            StageConfig {
+                mode,
+                ..StageConfig::new()
+            },
+        )
+    }
+
+    /// Insert a stage with the configuration it is to run with.
+    ///
+    /// The full form; the other two are shorthand for it, so there is one path
+    /// into the pipeline and not three. The caller resolves a [`StageConfig`]
+    /// per stage — in the binary, out of the mapped snapshot — and the stage is
+    /// handed it here, once, before it can see a tool result.
+    pub fn register_with<S: Stage + 'static>(
+        &mut self,
+        position: Position,
+        mut stage: S,
+        config: StageConfig,
     ) -> Result<&mut Self> {
         let name = stage.name();
         if self.contains(name) {
@@ -74,11 +103,15 @@ impl PipelineBuilder {
             Position::After(other) => self.index_of(other)? + 1,
         };
 
+        // After the position is known to be valid, so a stage rejected by this
+        // call is never left configured for a pipeline it did not join.
+        stage.configure(&config);
+
         let registered = Registered {
             name,
             tier: stage.tier(),
             stage: Box::new(stage),
-            mode,
+            config,
             budget: Budget::default(),
             disabled: false,
         };
@@ -141,7 +174,7 @@ impl Pipeline {
     pub fn run_tool_result(&mut self, result: &mut ToolResult) -> Vec<Saving> {
         let mut savings = Vec::new();
         for index in 0..self.stages.len() {
-            let mode = self.stages[index].mode;
+            let mode = self.stages[index].config.mode;
             if mode == Mode::Off || self.stages[index].disabled {
                 continue;
             }
@@ -176,7 +209,7 @@ impl Pipeline {
     pub fn run_request(&mut self, request: &mut Request) -> Vec<Saving> {
         let mut savings = Vec::new();
         for index in 0..self.stages.len() {
-            let mode = self.stages[index].mode;
+            let mode = self.stages[index].config.mode;
             if mode == Mode::Off || self.stages[index].disabled {
                 continue;
             }
@@ -210,7 +243,7 @@ impl Pipeline {
     pub fn run_usage(&mut self, usage: &Usage) -> Vec<Saving> {
         let mut savings = Vec::new();
         for index in 0..self.stages.len() {
-            if self.stages[index].mode == Mode::Off || self.stages[index].disabled {
+            if self.stages[index].config.mode == Mode::Off || self.stages[index].disabled {
                 continue;
             }
             let start = Instant::now();
@@ -253,7 +286,8 @@ impl Pipeline {
         let stage = &self.stages[index];
         saving.stage = stage.name;
         saving.tier = stage.tier;
-        saving.mode = stage.mode;
+        saving.mode = stage.config.mode;
+        saving.level = stage.config.level;
         saving
     }
 
@@ -275,19 +309,60 @@ impl Pipeline {
 
     /// The mode a stage is running in.
     pub fn mode(&self, name: &str) -> Option<Mode> {
-        self.stages.iter().find(|s| s.name == name).map(|s| s.mode)
+        self.stages
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.config.mode)
+    }
+
+    /// Everything a stage is running with: mode, level and settings.
+    ///
+    /// What `lessr config --explain <stage>` prints, and the reason it can be
+    /// trusted: these are the values the live pipeline holds, not the ones a
+    /// file says it should.
+    pub fn config(&self, name: &str) -> Option<&StageConfig> {
+        self.stages
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| &s.config)
     }
 
     /// Change a stage's mode. This is the kill switch behind `lessr on|off`
     /// and the self-healing table.
+    ///
+    /// The mode and nothing else: a stage switched off and on again comes back
+    /// at the level and settings it had, rather than quietly at the defaults.
     pub fn set_mode(&mut self, name: &str, mode: Mode) -> Result<()> {
-        let stage = self
-            .stages
-            .iter_mut()
-            .find(|s| s.name == name)
-            .ok_or_else(|| Error::UnknownStage(name.to_string()))?;
-        stage.mode = mode;
+        let index = self.index_of(name)?;
+        self.stages[index].config.mode = mode;
+        self.reconfigure(index);
         Ok(())
+    }
+
+    /// Replace a stage's whole configuration and hand it to the stage.
+    ///
+    /// `lessr level <stage> <level>` and a reload of the snapshot arrive here.
+    /// The pipeline is live and the stage has probably already run, which is
+    /// exactly why [`Stage::configure`] has to be idempotent.
+    pub fn set_config(&mut self, name: &str, config: StageConfig) -> Result<()> {
+        let index = self.index_of(name)?;
+        self.stages[index].config = config;
+        self.reconfigure(index);
+        Ok(())
+    }
+
+    /// Hand one stage the row it now sits in. The stage and its config are
+    /// separate fields, so one can be borrowed mutably while the other is read.
+    fn reconfigure(&mut self, index: usize) {
+        let registered = &mut self.stages[index];
+        registered.stage.configure(&registered.config);
+    }
+
+    fn index_of(&self, name: &str) -> Result<usize> {
+        self.stages
+            .iter()
+            .position(|s| s.name == name)
+            .ok_or_else(|| Error::UnknownStage(name.to_string()))
     }
 
     /// Whether a stage has been disabled for the session by the hard budget.
@@ -320,7 +395,7 @@ impl std::fmt::Debug for Pipeline {
     }
 }
 
-/// Renders the stage order as `name(mode)`, which is the only part of a
+/// Renders the stage order as `name(mode/level)`, which is the only part of a
 /// pipeline worth printing.
 struct StageList<'a>(&'a [Registered]);
 
@@ -329,9 +404,10 @@ impl std::fmt::Debug for StageList<'_> {
         f.debug_list()
             .entries(self.0.iter().map(|s| {
                 format!(
-                    "{}({}{})",
+                    "{}({}/{}{})",
                     s.name,
-                    s.mode.as_str(),
+                    s.config.mode.as_str(),
+                    s.config.level.as_str(),
                     if s.disabled { ", disabled" } else { "" }
                 )
             }))
@@ -341,8 +417,10 @@ impl std::fmt::Debug for StageList<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
-    use crate::types::{Tokens, ToolKind};
+    use crate::types::{Level, Tokens, ToolKind};
     use bytes::Bytes;
 
     /// Truncates content to `keep` bytes and counts what it removed.
@@ -369,7 +447,75 @@ mod tests {
         }
     }
 
-    struct Slow;
+    /// Every [`Stage::configure`] a stage was handed, in order. Shared with the
+    /// test because the pipeline owns the stage once it is registered.
+    #[derive(Clone, Default)]
+    struct ConfigLog(Arc<Mutex<Vec<StageConfig>>>);
+
+    impl ConfigLog {
+        fn calls(&self) -> Vec<StageConfig> {
+            self.0
+                .lock()
+                .expect("no test panics while holding it")
+                .clone()
+        }
+    }
+
+    /// Cuts to whatever its settings say, and only above `Safe` — a stage that
+    /// actually uses its configuration, so a test can see the config arrive by
+    /// what the content looks like afterwards.
+    struct Tunable {
+        log: ConfigLog,
+        /// Copied out at configure time, not read per call: the hook path may
+        /// not search the settings map once per tool call.
+        keep: usize,
+        level: Level,
+    }
+
+    impl Tunable {
+        fn new(log: &ConfigLog) -> Self {
+            Self {
+                log: log.clone(),
+                keep: usize::MAX,
+                level: Level::default(),
+            }
+        }
+    }
+
+    impl Stage for Tunable {
+        fn name(&self) -> &'static str {
+            "tunable"
+        }
+        fn tier(&self) -> Tier {
+            Tier::Free
+        }
+        fn configure(&mut self, config: &StageConfig) {
+            self.keep = config.settings.u64("keep", 8) as usize;
+            self.level = config.level;
+            self.log
+                .0
+                .lock()
+                .expect("no test panics while holding it")
+                .push(config.clone());
+        }
+        fn on_tool_result(&mut self, result: &mut ToolResult) -> Option<Saving> {
+            if self.level == Level::Safe || result.content.len() <= self.keep {
+                return None;
+            }
+            let before = result.content.len() as u64;
+            result.content = result.content.slice(..self.keep);
+            let after = result.content.len() as u64;
+            Some(Saving::bytes(before, after, Tokens::Exact(before - after)))
+        }
+    }
+
+    /// Blows the hard budget on every run, and counts how often it ran.
+    ///
+    /// The count is the point: "the disabled stage did not run again" is a
+    /// statement about invocations, and asserting it with a stopwatch instead
+    /// would fail on a loaded machine that simply descheduled us.
+    struct Slow(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
     impl Stage for Slow {
         fn name(&self) -> &'static str {
             "slow"
@@ -378,9 +524,23 @@ mod tests {
             Tier::Free
         }
         fn on_tool_result(&mut self, _result: &mut ToolResult) -> Option<Saving> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             std::thread::sleep(std::time::Duration::from_millis(12));
             None
         }
+    }
+
+    /// A [`StageConfig`] in one line, so a test reads as the config file does.
+    fn config(mode: Mode, level: Level, settings: &[(&str, u64)]) -> StageConfig {
+        let mut config = StageConfig {
+            mode,
+            level,
+            ..StageConfig::new()
+        };
+        for (key, value) in settings {
+            config.settings.set(key, *value);
+        }
+        config
     }
 
     fn result(content: &'static str) -> ToolResult {
@@ -581,8 +741,11 @@ mod tests {
 
     #[test]
     fn a_stage_over_the_hard_budget_is_dropped_for_the_session() {
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut builder = PipelineBuilder::new();
-        builder.register(Slow, Mode::Active).unwrap();
+        builder
+            .register(Slow(std::sync::Arc::clone(&runs)), Mode::Active)
+            .unwrap();
         let mut pipeline = builder.build();
 
         let mut r = result("anything");
@@ -593,11 +756,15 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].verdict, Verdict::Hard);
         assert!(events[0].disabled_stage);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 1);
 
         // The second call must not pay for it again.
-        let before = Instant::now();
         pipeline.run_tool_result(&mut r);
-        assert!(before.elapsed() < std::time::Duration::from_millis(5));
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a stage over the hard budget ran again"
+        );
         assert_eq!(pipeline.events().len(), 1, "no second breach to report");
     }
 
@@ -641,12 +808,15 @@ mod tests {
                 saving.stage = "someone-else";
                 saving.tier = Tier::Free;
                 saving.mode = Mode::Active;
+                saving.level = Level::Aggressive;
                 Some(saving)
             }
         }
 
         let mut builder = PipelineBuilder::new();
-        builder.register(Liar, Mode::Shadow).unwrap();
+        builder
+            .register_with(Position::Last, Liar, config(Mode::Shadow, Level::Safe, &[]))
+            .unwrap();
         let mut pipeline = builder.build();
 
         let mut r = result("x");
@@ -654,5 +824,210 @@ mod tests {
         assert_eq!(savings[0].stage, "honest");
         assert_eq!(savings[0].tier, Tier::Pro);
         assert_eq!(savings[0].mode, Mode::Shadow);
+        assert_eq!(savings[0].level, Level::Safe, "not the one it claimed");
+    }
+
+    #[test]
+    fn register_sets_the_mode_and_leaves_the_rest_compiled_in() {
+        let log = ConfigLog::default();
+        let mut builder = PipelineBuilder::new();
+        builder.register(Tunable::new(&log), Mode::Active).unwrap();
+        let mut pipeline = builder.build();
+
+        assert_eq!(
+            pipeline.config("tunable"),
+            Some(&config(Mode::Active, Level::Balanced, &[])),
+            "the old two-argument form still means mode and defaults"
+        );
+        assert_eq!(log.calls().len(), 1, "configured even without settings");
+
+        // And it runs: `keep` fell back to the stage's own default of 8.
+        let mut r = result("0123456789");
+        let savings = pipeline.run_tool_result(&mut r);
+        assert_eq!(&r.content[..], b"01234567");
+        assert_eq!(savings[0].level, Level::Balanced);
+    }
+
+    #[test]
+    fn register_with_hands_the_stage_the_configuration_it_will_run_with() {
+        let log = ConfigLog::default();
+        let wanted = config(Mode::Active, Level::Aggressive, &[("keep", 4)]);
+
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register_with(Position::Last, Tunable::new(&log), wanted.clone())
+            .unwrap();
+        let mut pipeline = builder.build();
+
+        assert_eq!(log.calls(), vec![wanted.clone()], "once, at registration");
+        assert_eq!(pipeline.config("tunable"), Some(&wanted));
+        assert_eq!(pipeline.config("nope"), None);
+
+        let mut r = result("0123456789");
+        let savings = pipeline.run_tool_result(&mut r);
+        assert_eq!(&r.content[..], b"0123", "the setting reached the stage");
+        assert_eq!(savings[0].level, Level::Aggressive);
+    }
+
+    #[test]
+    fn register_with_positions_a_stage_like_the_shorter_forms() {
+        let log = ConfigLog::default();
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register(
+                Truncate {
+                    name: "gate",
+                    keep: 9,
+                },
+                Mode::Active,
+            )
+            .unwrap();
+        builder
+            .register_with(
+                Position::Before("gate"),
+                Tunable::new(&log),
+                config(Mode::Active, Level::Safe, &[]),
+            )
+            .unwrap();
+        assert_eq!(builder.names(), ["tunable", "gate"]);
+
+        // A duplicate is still refused, and the rejected stage is not left
+        // configured for a pipeline it never joined.
+        let err = builder
+            .register_with(
+                Position::Last,
+                Tunable::new(&log),
+                config(Mode::Active, Level::Safe, &[]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::DuplicateStage(name) if name == "tunable"));
+        assert_eq!(log.calls().len(), 1, "only the one that was accepted");
+    }
+
+    #[test]
+    fn set_config_reconfigures_a_stage_that_is_already_running() {
+        let log = ConfigLog::default();
+        let first = config(Mode::Active, Level::Aggressive, &[("keep", 4)]);
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register_with(Position::Last, Tunable::new(&log), first.clone())
+            .unwrap();
+        let mut pipeline = builder.build();
+
+        let mut r = result("0123456789");
+        pipeline.run_tool_result(&mut r);
+        assert_eq!(&r.content[..], b"0123");
+
+        // `lessr level tunable balanced`, with a threshold to match.
+        let second = config(Mode::Active, Level::Balanced, &[("keep", 2)]);
+        pipeline.set_config("tunable", second.clone()).unwrap();
+        assert_eq!(log.calls(), vec![first, second.clone()], "again, in place");
+        assert_eq!(pipeline.config("tunable"), Some(&second));
+
+        let mut r = result("0123456789");
+        let savings = pipeline.run_tool_result(&mut r);
+        assert_eq!(&r.content[..], b"01", "the new threshold is in force");
+        assert_eq!(savings[0].level, Level::Balanced, "so is the new level");
+
+        assert!(pipeline.set_config("nope", StageConfig::new()).is_err());
+    }
+
+    #[test]
+    fn the_kill_switch_does_not_drop_the_level_and_settings() {
+        let log = ConfigLog::default();
+        let registered = config(Mode::Active, Level::Aggressive, &[("keep", 3)]);
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register_with(Position::Last, Tunable::new(&log), registered.clone())
+            .unwrap();
+        let mut pipeline = builder.build();
+
+        pipeline.set_mode("tunable", Mode::Off).unwrap();
+        pipeline.set_mode("tunable", Mode::Shadow).unwrap();
+
+        assert_eq!(
+            pipeline.config("tunable"),
+            Some(&config(Mode::Shadow, Level::Aggressive, &[("keep", 3)])),
+            "off and back on is not a reset to the defaults"
+        );
+        assert_eq!(
+            log.calls().last().map(|c| c.level),
+            Some(Level::Aggressive),
+            "and the stage was told, so its own copy did not drift"
+        );
+
+        let mut r = result("0123456789");
+        let savings = pipeline.run_tool_result(&mut r);
+        assert_eq!(&r.content[..], b"0123456789", "shadow must not mutate");
+        assert_eq!(savings[0].bytes_saved(), 7, "keep = 3 survived the switch");
+        assert_eq!(savings[0].level, Level::Aggressive);
+    }
+
+    #[test]
+    fn each_saving_carries_the_level_of_the_stage_that_made_it() {
+        // What lets the receipt say *the gate saved this much at balanced*, and
+        // the self-healing table tell one level's expand rate from another's.
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register_with(
+                Position::Last,
+                Truncate {
+                    name: "trap",
+                    keep: 8,
+                },
+                config(Mode::Active, Level::Safe, &[]),
+            )
+            .unwrap();
+        builder
+            .register_with(
+                Position::Last,
+                Truncate {
+                    name: "gate",
+                    keep: 4,
+                },
+                config(Mode::Active, Level::Aggressive, &[]),
+            )
+            .unwrap();
+        let mut pipeline = builder.build();
+
+        let mut r = result("0123456789");
+        let savings = pipeline.run_tool_result(&mut r);
+        assert_eq!(savings.len(), 2);
+        assert_eq!((savings[0].stage, savings[0].level), ("trap", Level::Safe));
+        assert_eq!(
+            (savings[1].stage, savings[1].level),
+            ("gate", Level::Aggressive)
+        );
+    }
+
+    #[test]
+    fn a_stage_that_ignores_configure_is_configured_anyway() {
+        // `Truncate` never implements `configure`. The defaulted method takes
+        // the config and drops it; the pipeline still holds it, which is what
+        // `lessr config --explain` prints and how an unread key gets reported.
+        let given = config(Mode::Active, Level::Safe, &[("nobody_reads_this", 1)]);
+        let mut builder = PipelineBuilder::new();
+        builder
+            .register_with(
+                Position::Last,
+                Truncate {
+                    name: "gate",
+                    keep: 5,
+                },
+                given.clone(),
+            )
+            .unwrap();
+        let mut pipeline = builder.build();
+
+        let mut r = result("0123456789");
+        let savings = pipeline.run_tool_result(&mut r);
+        assert_eq!(&r.content[..], b"01234");
+        assert_eq!(savings[0].bytes_saved(), 5);
+        assert_eq!(savings[0].level, Level::Safe);
+        assert_eq!(pipeline.config("gate"), Some(&given));
+        assert_eq!(
+            pipeline.config("gate").map(|c| c.settings.unread()),
+            Some(vec!["nobody_reads_this"])
+        );
     }
 }
