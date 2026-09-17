@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use lessr_core::PipelineBuilder;
 
-pub use cli::{Cli, Command};
+pub use cli::{Cli, Command, ConfigAction};
 
 /// Exit code for a command that exists but whose mechanism has not shipped.
 /// Distinct from 1 so a script can tell "not yet" from "went wrong".
@@ -82,10 +82,14 @@ fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
             "phase 2",
             "the paired A/B harness described in bench/README.md",
         )),
-        Command::On { .. } | Command::Off { .. } => Ok(not_yet(
-            "on/off",
+        Command::On { .. }
+        | Command::Off { .. }
+        | Command::Shadow { .. }
+        | Command::Level { .. }
+        | Command::Config { .. } => Ok(not_yet(
+            "on/off/shadow/level/config",
             "phase 1",
-            "the config file these write a stage mode into",
+            "the config file and snapshot these read and write (docs/CONFIG.md)",
         )),
     }
 }

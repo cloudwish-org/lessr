@@ -36,3 +36,4 @@ The open-source engine and base pack of Lessr, a local token-saving layer for co
 - Mechanism definitions and counting rules: `docs/MECHANISMS.md`
 - Safety rules: `docs/LOOP_SAFETY.md`
 - Performance budget and techniques: `docs/PERFORMANCE.md`
+- Per-mechanism settings, levels and kill switches: `docs/CONFIG.md`

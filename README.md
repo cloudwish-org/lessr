@@ -85,7 +85,7 @@ lessr pro
 Under 10 ms overhead, streaming untouched, single static Rust binary, zero config, self-updating. `lessr-core` and `lessr-gate` are libraries first: embed them in your harness instead of installing a proxy.
 
 - [Vision](docs/VISION.md) · [Architecture](docs/ARCHITECTURE.md) · [Mechanisms](docs/MECHANISMS.md) · [Packs](docs/PACKS.md)
-- [Performance](docs/PERFORMANCE.md) · [Adapters](docs/ADAPTERS.md) · [Receipt](docs/RECEIPT.md) · [Contributing](CONTRIBUTING.md)
+- [Performance](docs/PERFORMANCE.md) · [Adapters](docs/ADAPTERS.md) · [Receipt](docs/RECEIPT.md) · [Config](docs/CONFIG.md) · [Contributing](CONTRIBUTING.md)
 - Coding agents working in this repo: start at [AGENTS.md](AGENTS.md)
 
 MIT.

@@ -1,8 +1,7 @@
-//! omp. Confidence: unverified.
-//!
-//! Runs on the pi harness (`docs/ADAPTERS.md`), so it is configured the way pi
-//! is. It keeps its own entry because a user who installed omp should see omp
-//! in `lessr init`, not be told to go and read about pi.
+//! omp. Confidence: unverified as an agent of its own, because it is not one:
+//! omp runs on the pi harness, and `lessr init --agent pi` installs the
+//! extension it will use. The entry exists so that a user who installed omp
+//! sees omp in `lessr init` rather than being left to work that out.
 
 use crate::agent::AgentId;
 use crate::agents::Unverified;
@@ -11,5 +10,6 @@ use crate::agents::Unverified;
 pub(crate) static ADAPTER: Unverified = Unverified {
     id: AgentId::Omp,
     probes: &[".omp", ".config/omp"],
-    mechanism: "the pi harness adapter it runs on",
+    note: "omp runs on the pi harness, so there is nothing separate to write here: run\n\
+           `lessr init --agent pi`, which installs the extension omp will use.",
 };

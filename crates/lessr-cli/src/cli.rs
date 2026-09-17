@@ -71,12 +71,52 @@ pub enum Command {
     On {
         /// The stage name, as `lessr gain` prints it.
         stage: String,
+        /// Scope the change to the current repository.
+        #[arg(long)]
+        repo: bool,
     },
 
     /// Turn a mechanism off.
     Off {
         /// The stage name, as `lessr gain` prints it.
         stage: String,
+        /// Scope the change to the current repository.
+        #[arg(long)]
+        repo: bool,
+    },
+
+    /// Count a mechanism's saving without applying it.
+    Shadow {
+        /// The stage name, as `lessr gain` prints it.
+        stage: String,
+        /// Scope the change to the current repository.
+        #[arg(long)]
+        repo: bool,
+    },
+
+    /// Set how hard a mechanism works. A level changes how much is cut, never
+    /// whether the safety checks run: errors pass at every level.
+    Level {
+        /// The stage name, as `lessr gain` prints it.
+        stage: String,
+        /// `safe`, `balanced` or `aggressive`.
+        level: String,
+        /// Scope the change to the current repository.
+        #[arg(long)]
+        repo: bool,
+    },
+
+    /// Show or change settings.
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+        /// Why is this stage doing what it is doing? Prints every value in
+        /// force for it and which layer set each one.
+        #[arg(long, value_name = "STAGE")]
+        explain: Option<String>,
+        /// Scope to the current repository.
+        #[arg(long)]
+        repo: bool,
     },
 
     /// Restore every agent config Lessr touched, byte for byte.
@@ -94,4 +134,16 @@ pub enum Command {
 
     /// What is in this binary, and what Lessr Pro adds.
     Pro,
+}
+
+/// Changes `lessr config` can make.
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Set one value without opening the file.
+    Set {
+        /// Dotted key, e.g. `stages.gate.level`.
+        key: String,
+        /// The new value.
+        value: String,
+    },
 }

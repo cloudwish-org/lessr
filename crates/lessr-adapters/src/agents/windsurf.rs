@@ -1,8 +1,8 @@
 //! Windsurf. Confidence: unverified.
 //!
-//! One of the four rules-file agents in `docs/ADAPTERS.md` (with Cline, Roo and
-//! Kilo): a rules file, plus a hook where the agent has one. Neither the file's
-//! location nor whether the hook exists is confirmed here.
+//! Windsurf keeps hooks at `~/.codeium/windsurf/hooks.json`, but the schema of
+//! an entry in it could not be confirmed, and neither could the event that can
+//! replace a tool result.
 
 use crate::agent::AgentId;
 use crate::agents::Unverified;
@@ -11,10 +11,12 @@ use crate::agents::Unverified;
 pub(crate) static ADAPTER: Unverified = Unverified {
     id: AgentId::Windsurf,
     probes: &[
+        ".codeium/windsurf/hooks.json",
         ".codeium/windsurf",
         ".windsurf",
-        ".config/Windsurf",
         "Library/Application Support/Windsurf",
     ],
-    mechanism: "a rules file, and a hook if it has one",
+    note: "Windsurf's hooks file is easy to find and its entry schema is not: neither the\n\
+           shape of an entry nor which event can replace a tool result could be\n\
+           confirmed. Lessr writes nothing it has not verified.",
 };

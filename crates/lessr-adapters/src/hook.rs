@@ -1,15 +1,21 @@
-//! The hook contract: the agent's tool-call JSON in, the same JSON out.
+//! The hook contract: the agent's tool-call JSON in, whatever that agent
+//! expects on stdout, out.
 //!
 //! `docs/ADAPTERS.md`: "Input: the agent's tool-call JSON on stdin. Output: the
 //! same JSON with the tool result replaced, on stdout, exit 0. Any internal
 //! error → original JSON, exit 0, error logged. A hook must never break the
 //! agent."
 //!
+//! "The same JSON back" is Claude Code's contract, and OpenCode's, because we
+//! wrote the OpenCode side too. Others want a small decision document instead,
+//! so the shape of the output belongs to the adapter — see
+//! [`crate::agents::Adapter::render_hook`]. What every agent shares is the rule
+//! underneath: when there is nothing to filter, say nothing new.
+//!
 //! That is why [`HookPayload`] keeps the bytes it was given as well as the
-//! parsed form. When there is nothing to filter — a `PreToolUse` payload has no
-//! result yet — [`render_hook_output`] hands back the original bytes rather
-//! than a re-serialised copy, so nothing about the agent's own JSON changes on
-//! the way through.
+//! parsed form: an unchanged payload goes back exactly as it arrived rather
+//! than re-serialised, so nothing about the agent's own JSON changes on the way
+//! through.
 
 use lessr_core::ToolResult;
 use serde_json::Value;
@@ -18,14 +24,57 @@ use crate::agent::AgentId;
 use crate::agents;
 use crate::error::{Error, Result};
 
-/// Where in the agent's JSON the filterable content came from, and therefore
-/// where a rewritten version has to go back.
+/// Where in the agent's JSON the filterable text sits: the object keys to walk
+/// from the root.
+///
+/// A path rather than a variant per agent, because every agent so far keeps its
+/// tool output in a string a few keys down, and the only thing that differs is
+/// which keys. An empty path is the root itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Slot {
-    /// `tool_response` is itself the text.
-    Whole,
-    /// `tool_response.stdout`.
-    Stdout,
+pub(crate) struct Slot(&'static [&'static str]);
+
+impl Slot {
+    /// A slot at this chain of keys.
+    pub(crate) const fn at(path: &'static [&'static str]) -> Slot {
+        Slot(path)
+    }
+
+    /// The string this slot points at, if there is one there.
+    pub(crate) fn get(self, root: &Value) -> Option<&str> {
+        let mut node = root;
+        for key in self.0 {
+            node = node.get(key)?;
+        }
+        node.as_str()
+    }
+
+    /// Replace the string this slot points at.
+    ///
+    /// A path that no longer resolves leaves the document alone: the caller is
+    /// substituting into a clone of what it parsed, so this cannot happen
+    /// without a bug, and a bug here should lose a saving, not a payload.
+    pub(crate) fn put(self, root: &mut Value, content: &str) {
+        let mut node = root;
+        for key in self.0 {
+            let Some(next) = node.get_mut(key) else {
+                return;
+            };
+            node = next;
+        }
+        *node = Value::String(content.to_string());
+    }
+}
+
+/// The first of `candidates` that holds a string, and what it holds.
+///
+/// Adapters read defensively: an agent whose payload shape we have not pinned
+/// down gets a list of the places its output could be, and finding none means
+/// there is nothing to filter — never an error. A hook that refuses a payload
+/// it does not recognise is a hook that breaks the agent.
+pub(crate) fn first_slot<'a>(root: &'a Value, candidates: &[Slot]) -> Option<(Slot, &'a str)> {
+    candidates
+        .iter()
+        .find_map(|&slot| slot.get(root).map(|text| (slot, text)))
 }
 
 /// A parsed hook payload: the result a stage can filter, and where it sits.
@@ -63,17 +112,15 @@ impl HookPayload {
 
 /// Parse an agent's hook JSON.
 ///
-/// `Ok` even when there is nothing to filter: a hook that refuses a payload it
-/// does not recognise is a hook that breaks the agent. The errors here are the
-/// two cases where we were not given a hook payload at all — it is not JSON, or
-/// it is not an object — plus agents that have no hook.
+/// `Ok` even when there is nothing to filter. The errors here are the cases
+/// where we were not given a hook payload at all — it is not JSON, or it is not
+/// an object — plus agents that have no hook.
 pub fn parse_hook_input(agent: AgentId, input: &[u8]) -> Result<HookPayload> {
     let json: Value = serde_json::from_slice(input).map_err(Error::HookJson)?;
     if !json.is_object() {
         return Err(Error::HookShape);
     }
-    let parsed = agents::adapter(agent).parse_hook(&json)?;
-    let (result, slot) = match parsed {
+    let (result, slot) = match agents::adapter(agent).parse_hook(&json)? {
         Some((result, slot)) => (Some(result), Some(slot)),
         None => (None, None),
     };
@@ -86,12 +133,12 @@ pub fn parse_hook_input(agent: AgentId, input: &[u8]) -> Result<HookPayload> {
     })
 }
 
-/// Render the payload back into the agent's JSON shape, with the (possibly
-/// rewritten) result substituted in.
+/// Render the payload back into what the agent expects on stdout, with the
+/// (possibly rewritten) result substituted in.
 ///
-/// With nothing to substitute, the input is returned byte for byte. The output
-/// is compact and carries no trailing newline: it is read by a program, and the
-/// caller decides how to end its own stdout.
+/// With nothing to substitute, the agent gets whatever it reads as "no
+/// opinion": its own payload back for the agents whose contract is an echo,
+/// and nothing at all for the agents that read stdout as a decision.
 pub fn render_hook_output(agent: AgentId, payload: &HookPayload) -> Result<Vec<u8>> {
     if agent != payload.agent {
         return Err(Error::AgentMismatch {
@@ -99,16 +146,14 @@ pub fn render_hook_output(agent: AgentId, payload: &HookPayload) -> Result<Vec<u
             rendered: agent.display_name(),
         });
     }
+    let adapter = agents::adapter(agent);
     let (Some(result), Some(slot)) = (payload.result.as_ref(), payload.slot) else {
-        return Ok(payload.raw.clone());
+        return Ok(adapter.render_unchanged(&payload.raw));
     };
     // A filter that cut mid-character would otherwise put invalid text into the
     // agent's context; the caller falls back to the original bytes instead.
     let content = std::str::from_utf8(&result.content).map_err(|_| Error::NonUtf8)?;
-
-    let mut json = payload.json.clone();
-    agents::adapter(agent).substitute(&mut json, slot, content);
-    serde_json::to_vec(&json).map_err(Error::HookJson)
+    adapter.render_hook(&payload.json, slot, content)
 }
 
 #[cfg(test)]
@@ -148,5 +193,29 @@ mod tests {
             render_hook_output(AgentId::ClaudeCode, &payload).unwrap(),
             input.to_vec()
         );
+    }
+
+    #[test]
+    fn a_slot_walks_keys_and_only_reads_strings() {
+        let doc = serde_json::json!({"a": {"b": "text", "c": 3}});
+        assert_eq!(Slot::at(&["a", "b"]).get(&doc), Some("text"));
+        assert_eq!(Slot::at(&["a", "c"]).get(&doc), None);
+        assert_eq!(Slot::at(&["a", "z"]).get(&doc), None);
+
+        let mut doc = doc;
+        Slot::at(&["a", "b"]).put(&mut doc, "other");
+        assert_eq!(doc["a"]["b"], "other");
+        Slot::at(&["a", "z", "y"]).put(&mut doc, "ignored");
+        assert_eq!(doc["a"]["b"], "other");
+    }
+
+    #[test]
+    fn the_first_slot_that_holds_a_string_wins() {
+        let doc = serde_json::json!({"output": {"output": "x"}});
+        let candidates = [Slot::at(&["stdout"]), Slot::at(&["output", "output"])];
+        let (slot, text) = first_slot(&doc, &candidates).unwrap();
+        assert_eq!(text, "x");
+        assert_eq!(slot, Slot::at(&["output", "output"]));
+        assert!(first_slot(&doc, &[Slot::at(&["nope"])]).is_none());
     }
 }

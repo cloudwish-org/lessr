@@ -61,4 +61,4 @@ lessr-cli ─┬─ lessr-proxy ─── lessr-core
 
 ## Configuration
 
-`~/.config/lessr/config.toml` (XDG; `~/Library/Application Support/lessr` on macOS; `%APPDATA%\lessr` on Windows). Per-stage `mode`, per-repo overrides, proxy port, provider upstreams. The hook path reads a binary snapshot regenerated whenever the TOML changes.
+`~/.config/lessr/config.toml` (XDG; `~/Library/Application Support/lessr` on macOS; `%APPDATA%\lessr` on Windows). Every mechanism has three axes — `mode` (off, shadow, active), `level` (safe, balanced, aggressive) and its own settings — resolved through global, per-stage and per-repo layers, under a safety floor no layer can overrule. Plus proxy port and provider upstreams. The hook path parses no TOML; it reads a binary snapshot regenerated whenever the TOML changes. Full contract: [CONFIG.md](CONFIG.md).

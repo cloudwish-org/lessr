@@ -82,6 +82,20 @@ pub(crate) fn copy(from: &Path, to: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Delete a file that may already be gone.
+///
+/// A missing file is a success: uninstall is meant to be runnable twice.
+pub(crate) fn remove(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// `mkdir -p` for a file's directory.
 fn create_parent(path: &Path) -> Result<()> {
     let Some(parent) = path.parent() else {

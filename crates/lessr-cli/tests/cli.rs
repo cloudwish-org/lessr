@@ -164,6 +164,9 @@ fn unshipped_commands_say_so_instead_of_pretending() {
         vec!["bench"],
         vec!["on", "gate"],
         vec!["off", "gate"],
+        vec!["shadow", "gate"],
+        vec!["level", "gate", "aggressive"],
+        vec!["config"],
     ] {
         let out = run(home.path(), &args, None);
         assert_eq!(

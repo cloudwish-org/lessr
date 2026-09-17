@@ -60,6 +60,13 @@ pub enum Change {
         /// The original's path.
         to: PathBuf,
     },
+    /// Remove a file Lessr wrote. Only ever a file this crate generated: the
+    /// plan that produces one has already checked that the contents are ours,
+    /// because nothing else here is allowed to delete a user's file.
+    Delete {
+        /// The file to remove.
+        path: PathBuf,
+    },
     /// Something the user must do themselves, e.g. the generic `base_url`, or
     /// an agent whose config format Lessr will not guess at.
     Manual {
@@ -120,6 +127,9 @@ impl Plan {
                 Change::Restore { from, to } => {
                     let _ = writeln!(out, "  restore {}", to.display());
                     let _ = writeln!(out, "     from {}", from.display());
+                }
+                Change::Delete { path } => {
+                    let _ = writeln!(out, "  delete  {}", path.display());
                 }
                 Change::Manual { title, snippet } => {
                     let _ = writeln!(out, "  manual  {title}");
@@ -223,6 +233,10 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
                 file::copy(from, to)?;
                 applied.changed.push(to.clone());
             }
+            Change::Delete { path } => {
+                file::remove(path)?;
+                applied.changed.push(path.clone());
+            }
             Change::Backup { .. } | Change::Manual { .. } | Change::Nothing { .. } => {}
         }
     }
@@ -249,6 +263,7 @@ fn writes_allowed(adapter: &dyn Adapter, plan: &Plan) -> Result<()> {
                 | Change::WriteFile { .. }
                 | Change::Backup { .. }
                 | Change::Restore { .. }
+                | Change::Delete { .. }
         )
     });
     if writes {
