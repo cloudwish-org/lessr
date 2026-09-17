@@ -26,8 +26,7 @@ use anyhow::{Context, Result, anyhow};
 use lessr_core::{Config, Level, Mode, StageOverride, Value, ValueKind};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
-use super::Problem;
-use super::known;
+use super::{Problem, first_line, known};
 
 /// The file, inside the config directory.
 pub const FILE_NAME: &str = "config.toml";
@@ -336,14 +335,6 @@ fn rendered(item: &Item) -> String {
     format!("`{}`", text.trim())
 }
 
-/// The first line of a parser's complaint.
-///
-/// `toml_edit` renders an error as a snippet with carets under it, which is
-/// the right thing in a compiler and the wrong thing in a one-line report.
-fn first_line(err: &toml_edit::TomlError) -> String {
-    err.message().lines().next().unwrap_or("").to_string()
-}
-
 /// Where a value goes in the document.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slot {
@@ -377,6 +368,11 @@ impl Slot {
         }
     }
 
+    /// The key itself, for a message that has already said where it is.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
     /// How a message spells it: `stages.gate.mode`.
     pub fn dotted(&self) -> String {
         let mut out = String::new();
@@ -404,6 +400,7 @@ fn bare(key: &str) -> bool {
 }
 
 /// What one write changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Written {
     /// What the key said before, if it said anything.
     pub before: Option<String>,
@@ -435,7 +432,7 @@ pub fn write(path: &Path, slot: &Slot, value: toml_edit::Value) -> Result<Writte
     })?;
 
     let table = table_at(&mut document, &slot.path, &slot.dotted())?;
-    let before = table.get(&slot.key).map(|item| unquoted(item));
+    let before = table.get(&slot.key).map(unquoted);
 
     match table.get_mut(&slot.key) {
         // Replace the value and nothing else. `insert` would reset the key's
@@ -691,9 +688,8 @@ mode = "off"
     fn a_stage_this_build_does_not_have_is_reported_once_not_per_key() {
         // A Pro config read by the free binary. One line about the stage, and
         // silence about the keys underneath it.
-        let (_dir, loaded) = load_text(
-            "[stages.cachefix]\nmode = \"active\"\nprefix_bytes = 2048\nwindow = 12\n",
-        );
+        let (_dir, loaded) =
+            load_text("[stages.cachefix]\nmode = \"active\"\nprefix_bytes = 2048\nwindow = 12\n");
         assert_eq!(loaded.problems.len(), 1);
         assert_eq!(loaded.problems[0].at, "stages.cachefix");
         assert_eq!(
@@ -788,7 +784,12 @@ mode = "off"
         let path = path_in(dir.path());
         let repo = Path::new("/home/dev/work/monorepo");
 
-        write(&path, &Slot::stage(Some(repo), "gate", "mode"), "off".into()).unwrap();
+        write(
+            &path,
+            &Slot::stage(Some(repo), "gate", "mode"),
+            "off".into(),
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.contains("[repo.\"/home/dev/work/monorepo\".stages.gate]"),
@@ -811,7 +812,12 @@ mode = "off"
 
         assert_eq!(second.before.as_deref(), Some("safe"));
         let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text.matches("level =").count(), 1, "{text}");
+        // Set lines only; the skeleton's comments explain the key as well.
+        let set = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("level ="))
+            .count();
+        assert_eq!(set, 1, "{text}");
     }
 
     #[test]

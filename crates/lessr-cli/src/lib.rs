@@ -9,6 +9,7 @@
 //! crate, or is gated behind a feature flag. Tiering is crates.
 
 mod cli;
+mod config;
 mod hook;
 mod install;
 mod pro;
@@ -16,7 +17,7 @@ mod pro;
 use std::process::ExitCode;
 
 use clap::Parser;
-use lessr_core::PipelineBuilder;
+use lessr_core::{Mode, PipelineBuilder};
 
 pub use cli::{Cli, Command, ConfigAction};
 
@@ -54,6 +55,16 @@ fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
         Command::Init { show, yes, agent } => install::init(show, yes, agent),
         Command::Uninstall { show, yes, agent } => install::uninstall(show, yes, agent),
 
+        Command::On { stage, repo } => config::set_mode(&stage, Mode::Active, repo),
+        Command::Off { stage, repo } => config::set_mode(&stage, Mode::Off, repo),
+        Command::Shadow { stage, repo } => config::set_mode(&stage, Mode::Shadow, repo),
+        Command::Level { stage, level, repo } => config::set_level(&stage, &level, repo),
+        Command::Config {
+            action,
+            explain,
+            repo,
+        } => config::config(action, explain.as_deref(), repo),
+
         Command::Pro => {
             print!("{}", pro::page());
             Ok(ExitCode::SUCCESS)
@@ -81,15 +92,6 @@ fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
             "bench",
             "phase 2",
             "the paired A/B harness described in bench/README.md",
-        )),
-        Command::On { .. }
-        | Command::Off { .. }
-        | Command::Shadow { .. }
-        | Command::Level { .. }
-        | Command::Config { .. } => Ok(not_yet(
-            "on/off/shadow/level/config",
-            "phase 1",
-            "the config file and snapshot these read and write (docs/CONFIG.md)",
         )),
     }
 }

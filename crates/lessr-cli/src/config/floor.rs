@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use lessr_core::SafetyFloor;
 use toml_edit::{DocumentMut, Item};
 
-use super::Problem;
+use super::{Problem, first_line};
 
 /// The file the self-healing table lives in, inside the config directory.
 pub const FILE_NAME: &str = "healing.toml";
@@ -55,7 +55,10 @@ pub fn load(path: &Path) -> (SafetyFloor, Vec<Problem>) {
         Err(err) => {
             problems.push(Problem::new(
                 FILE_NAME,
-                format!("is not TOML ({}); no stage is held down by it", first_line(&err)),
+                format!(
+                    "is not TOML ({}); no stage is held down by it",
+                    first_line(&err)
+                ),
             ));
             return (floor, problems);
         }
@@ -91,14 +94,6 @@ pub fn load(path: &Path) -> (SafetyFloor, Vec<Problem>) {
     }
 
     (floor, problems)
-}
-
-/// The first line of a parser's complaint.
-///
-/// `toml_edit` renders an error as a snippet with carets under it, which is
-/// the right thing in a compiler and the wrong thing inside a one-line report.
-fn first_line(err: &toml_edit::TomlError) -> String {
-    err.message().lines().next().unwrap_or("").to_string()
 }
 
 #[cfg(test)]
@@ -137,7 +132,10 @@ reason = "handles expanded on 14 % of its outputs"
             Some("handles expanded on 14 % of its outputs"),
             "a floor holds everywhere under the repository it names"
         );
-        assert_eq!(floor.reason("gate", Some(Path::new("/home/dev/other"))), None);
+        assert_eq!(
+            floor.reason("gate", Some(Path::new("/home/dev/other"))),
+            None
+        );
         assert_eq!(floor.reason("gate", None), None, "it is not global");
     }
 
@@ -146,7 +144,10 @@ reason = "handles expanded on 14 % of its outputs"
         let (_dir, path) = write("[[off]]\nstage = \"trap\"\nreason = \"expanded\"\n");
         let (floor, _) = load(&path);
         assert_eq!(floor.reason("trap", None), Some("expanded"));
-        assert_eq!(floor.reason("trap", Some(Path::new("/anywhere"))), Some("expanded"));
+        assert_eq!(
+            floor.reason("trap", Some(Path::new("/anywhere"))),
+            Some("expanded")
+        );
     }
 
     #[test]

@@ -25,12 +25,12 @@ mod repo;
 mod show;
 mod snapshot;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
 use lessr_adapters::Paths;
-use lessr_core::{Config, EnvOverrides, Layer, Level, Mode, Resolved, Value};
+use lessr_core::{Config, EnvOverrides, Layer, Level, Mode, Resolved, Value, ValueKind};
 
 use crate::cli::ConfigAction;
 
@@ -41,6 +41,7 @@ use crate::cli::ConfigAction;
 /// is reported; a key nothing reads is reported too, because a typo that
 /// silently does nothing is worse than a typo that says so. Neither may break
 /// someone's agent, so nothing in this crate turns one of these into an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
     /// Where it is: `stages.gate.mode`, or the name of an environment
     /// variable.
@@ -92,7 +93,16 @@ pub fn config(action: Option<ConfigAction>, explain: Option<&str>, repo: bool) -
                 Some(stage) => print!("{}", show::explain(&session, stage)),
                 None => print!("{}", show::table(&session)),
             }
-            Ok(ExitCode::SUCCESS)
+            // A file that does not parse at all is the one thing here that is
+            // worth a non-zero exit: the layers being printed are not the
+            // user's, the hook is running on the snapshot from before the
+            // edit, and a script has no other way to be told. Values that
+            // merely fall back are reported and exit 0 — they are what the
+            // command is for.
+            match session.unparseable {
+                Some(_) => Ok(ExitCode::FAILURE),
+                None => Ok(ExitCode::SUCCESS),
+            }
         }
     }
 }
@@ -127,7 +137,10 @@ impl Axis {
     fn resolved(self, resolved: &Resolved) -> (String, Layer) {
         match self {
             Axis::Mode(_) => (resolved.mode().as_str().to_string(), resolved.mode_layer()),
-            Axis::Level(_) => (resolved.level().as_str().to_string(), resolved.level_layer()),
+            Axis::Level(_) => (
+                resolved.level().as_str().to_string(),
+                resolved.level_layer(),
+            ),
         }
     }
 }
@@ -251,11 +264,15 @@ impl Session {
 
     /// `lessr on|off|shadow|level`, and `config set` for the same two keys.
     fn set_axis(&mut self, stage: &str, axis: Axis) -> Result<ExitCode> {
+        // The floor is not a layer, so there is no file that would carry this
+        // out; only `off` agrees with it and can be written.
         if let Axis::Mode(mode) = axis {
-            if mode != Mode::Off {
-                if let Some(reason) = self.config.floor().reason(stage, self.scope.as_deref()) {
-                    return Ok(self.refuse_floor(stage, mode, reason));
-                }
+            let floored = match mode {
+                Mode::Off => None,
+                _ => self.config.floor().reason(stage, self.scope.as_deref()),
+            };
+            if let Some(reason) = floored {
+                return Ok(self.refuse_floor(stage, mode, reason));
             }
         }
 
@@ -307,16 +324,19 @@ impl Session {
         let parsed = Value::from(text);
 
         let value: toml_edit::Value = match known::tunable(stage, key) {
+            // Validated before anything is written, against the same coercion
+            // rules the stage will read it through: `"5"` is a number there,
+            // so it is a number here.
             Some(tunable) => match tunable.kind {
-                lessr_core::ValueKind::Int => match parsed.as_u64().and_then(|n| i64::try_from(n).ok()) {
+                ValueKind::Int => match parsed.as_u64().and_then(|n| i64::try_from(n).ok()) {
                     Some(number) => number.into(),
                     None => bail!("`{}` takes a whole number, not `{text}`", slot.dotted()),
                 },
-                lessr_core::ValueKind::Bool => match parsed.as_bool() {
+                ValueKind::Bool => match parsed.as_bool() {
                     Some(flag) => flag.into(),
                     None => bail!("`{}` takes true or false, not `{text}`", slot.dotted()),
                 },
-                lessr_core::ValueKind::Str => text.into(),
+                ValueKind::Str => text.into(),
             },
             // Reported, not rejected: the Pro binary is this same CLI with
             // more stages registered, so a key this build cannot name may
@@ -352,7 +372,7 @@ impl Session {
         let written = file::write(&self.file, &slot, i64::from(port).into())?;
         self.reload()?;
         println!("proxy port {port}{}", was(&written));
-        self.report_files();
+        self.report_files(written.created);
         Ok(ExitCode::SUCCESS)
     }
 
@@ -369,12 +389,8 @@ impl Session {
             Some(repo) => format!(" in {}", repo.display()),
             None => String::new(),
         };
-        println!(
-            "{stage} {} = {value}{scope}{}",
-            slot.dotted().rsplit('.').next().unwrap_or(""),
-            was(written)
-        );
-        self.report_files();
+        println!("{stage} {} = {value}{scope}{}", slot.key(), was(written));
+        self.report_files(written.created);
 
         for note in self.notes(stage, axis) {
             println!("  note      {note}");
@@ -382,8 +398,12 @@ impl Session {
     }
 
     /// The two paths every write touches.
-    fn report_files(&self) {
-        println!("  wrote     {}", self.file.display());
+    ///
+    /// A file that had to be created is worth naming as such: it is the moment
+    /// a user learns where their configuration lives.
+    fn report_files(&self, created: bool) {
+        let verb = if created { "created  " } else { "wrote    " };
+        println!("  {verb} {}", self.file.display());
         println!(
             "  snapshot  {} — {}",
             self.snapshot.display(),
@@ -415,27 +435,30 @@ impl Session {
                 ));
             }
 
-            // A global change in a repository that overrides it is the most
+            // A global change that a repository layer overrides is the most
             // common way a config command looks like it did nothing.
-            if self.scope.is_none() {
-                if let Some(here) = &self.here {
-                    let (local, layer) = axis.resolved(&self.config.resolve(stage, Some(here)));
-                    if local != value {
-                        notes.push(format!(
-                            "in {} it stays {local}, set by {}",
-                            here.display(),
-                            layer.as_str()
-                        ));
-                    }
+            let here = self.here.as_ref().filter(|_| self.scope.is_none());
+            if let Some(here) = here {
+                let (local, layer) = axis.resolved(&self.config.resolve(stage, Some(here)));
+                if local != value {
+                    notes.push(format!(
+                        "in {} it stays {local}, set by {}",
+                        here.display(),
+                        layer.as_str()
+                    ));
                 }
             }
         }
 
-        if !self.problems.is_empty() {
-            notes.push(format!(
-                "{} other thing(s) in your configuration need attention; `lessr config` lists them",
-                self.problems.len()
-            ));
+        match self.problems.len() {
+            0 => {}
+            1 => notes.push(
+                "one other thing in your configuration needs attention; `lessr config` says what"
+                    .to_string(),
+            ),
+            count => notes.push(format!(
+                "{count} other things in your configuration need attention; `lessr config` says what"
+            )),
         }
 
         notes
@@ -452,9 +475,7 @@ impl Session {
             Some(repo) => format!(" in {}", repo.display()),
             None => String::new(),
         };
-        eprintln!(
-            "lessr: {stage} is off{where_} and configuration cannot turn it back on."
-        );
+        eprintln!("lessr: {stage} is off{where_} and configuration cannot turn it back on.");
         eprintln!("       Lessr turned it off itself: {reason}.");
         eprintln!(
             "       That is the safety floor (loop-safety rule 5). It sits above every config"
@@ -479,6 +500,14 @@ fn was(written: &file::Written) -> String {
     }
 }
 
+/// The first line of a parser's complaint.
+///
+/// `toml_edit` renders an error as a snippet with carets under it, which is
+/// the right thing in a compiler and the wrong thing in a one-line report.
+fn first_line(err: &toml_edit::TomlError) -> String {
+    err.message().lines().next().unwrap_or("").to_string()
+}
+
 /// The TOML type for a value nothing in this build can type-check.
 ///
 /// Deliberately narrow. `true` and `false` are booleans and a whole number is
@@ -501,9 +530,11 @@ mod tests {
 
     #[test]
     fn inference_only_claims_what_is_unambiguous() {
-        assert_eq!(infer("400"), toml_edit::Value::from(400i64));
-        assert_eq!(infer("true"), toml_edit::Value::from(true));
-        assert_eq!(infer("off"), toml_edit::Value::from("off"));
-        assert_eq!(infer("tail"), toml_edit::Value::from("tail"));
+        // Rendered, because that is what lands in the file: a quoted `"off"`
+        // is a string, and an unquoted `400` is a number.
+        assert_eq!(infer("400").to_string(), "400");
+        assert_eq!(infer("true").to_string(), "true");
+        assert_eq!(infer("off").to_string(), "\"off\"");
+        assert_eq!(infer("tail").to_string(), "\"tail\"");
     }
 }

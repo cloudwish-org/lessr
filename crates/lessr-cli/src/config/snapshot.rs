@@ -40,6 +40,10 @@ pub enum State {
     /// There is nothing to compile and nothing stale to correct: no config
     /// file, no floor, no snapshot on disk.
     Nothing,
+    /// Left exactly as it was, because `config.toml` does not parse. Compiling
+    /// the defaults over a snapshot built from a file that used to parse would
+    /// answer a syntax error by silently un-configuring every mechanism.
+    Held,
 }
 
 impl State {
@@ -49,6 +53,7 @@ impl State {
             State::Fresh => "up to date",
             State::Rebuilt(why) => why,
             State::Nothing => "not written: nothing to compile yet",
+            State::Held => "left as it was: the config file does not parse",
         }
     }
 }
@@ -82,9 +87,7 @@ pub fn refresh(path: &Path, config: &Config, source_exists: bool) -> Result<Stat
             "written: there was none"
         }
         Err(err) => {
-            return Err(
-                anyhow::Error::from(err).context(format!("cannot read {}", path.display()))
-            );
+            return Err(anyhow::Error::from(err).context(format!("cannot read {}", path.display())));
         }
     };
 
@@ -113,8 +116,14 @@ mod tests {
     fn nothing_to_compile_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(dir.path());
-        assert_eq!(refresh(&path, &Config::new(), false).unwrap(), State::Nothing);
-        assert!(!path.exists(), "a user who configured nothing gets no files");
+        assert_eq!(
+            refresh(&path, &Config::new(), false).unwrap(),
+            State::Nothing
+        );
+        assert!(
+            !path.exists(),
+            "a user who configured nothing gets no files"
+        );
     }
 
     #[test]
