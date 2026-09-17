@@ -97,9 +97,11 @@ pub fn load(path: &Path) -> Loaded {
 
 /// `[stages.*]`, either at the top level or inside a `[repo."<path>"]`.
 fn read_stages(item: &Item, repo: Option<&Path>, loaded: &mut Loaded) {
+    // Spelled the way the file spells it, so a problem can be found by
+    // searching for what it prints.
     let prefix = match repo {
         None => "stages".to_string(),
-        Some(path) => format!("repo.{:?}.stages", path.display().to_string()),
+        Some(path) => format!("repo.\"{}\".stages", path.display()),
     };
     let Some(table) = item.as_table_like() else {
         loaded

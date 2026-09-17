@@ -264,6 +264,8 @@ impl Session {
 
     /// `lessr on|off|shadow|level`, and `config set` for the same two keys.
     fn set_axis(&mut self, stage: &str, axis: Axis) -> Result<ExitCode> {
+        named(stage)?;
+
         // The floor is not a layer, so there is no file that would carry this
         // out; only `off` agrees with it and can be written.
         if let Axis::Mode(mode) = axis {
@@ -320,6 +322,10 @@ impl Session {
 
     /// One tunable of one stage.
     fn set_setting(&mut self, stage: &str, key: &str, text: &str) -> Result<ExitCode> {
+        named(stage)?;
+        if key.trim().is_empty() {
+            bail!("a setting needs a name: `lessr config set stages.gate.max_repeated_lines 3`");
+        }
         let slot = file::Slot::stage(self.scope.as_deref(), stage, key);
         let parsed = Value::from(text);
 
@@ -341,14 +347,18 @@ impl Session {
             // Reported, not rejected: the Pro binary is this same CLI with
             // more stages registered, so a key this build cannot name may
             // still be one something reads. Refusing it would make the free
-            // binary unable to configure the Pro one.
+            // binary unable to configure the Pro one. A key under a mechanism
+            // this build does have, though, is a typo worth spelling out —
+            // and one under a mechanism it does not is covered by the note.
             None => {
-                eprintln!(
-                    "lessr: nothing in this build reads `{}`. Writing it anyway; \
-                     {stage} takes {}.",
-                    slot.dotted(),
-                    known::keys(stage).join(", ")
-                );
+                if known::stage(stage).is_some() {
+                    eprintln!(
+                        "lessr: nothing in this build reads `{}`. Writing it anyway; \
+                         {stage} takes {}.",
+                        slot.dotted(),
+                        known::keys(stage).join(", ")
+                    );
+                }
                 infer(text)
             }
         };
@@ -500,6 +510,18 @@ fn was(written: &file::Written) -> String {
     }
 }
 
+/// Refuse a mechanism name the file cannot hold.
+///
+/// An empty one is the case that matters: `[stages.""]` is what the snapshot
+/// uses for the nameless `[stages.default]` record, so writing one would put
+/// two different things under the same name on disk.
+fn named(stage: &str) -> Result<()> {
+    if stage.trim().is_empty() {
+        bail!("a mechanism needs a name: `lessr off gate`, or `stages.gate.mode`");
+    }
+    Ok(())
+}
+
 /// The first line of a parser's complaint.
 ///
 /// `toml_edit` renders an error as a snippet with carets under it, which is
@@ -527,6 +549,13 @@ fn infer(text: &str) -> toml_edit::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nameless_mechanism_is_refused_before_anything_is_written() {
+        assert!(named("").is_err());
+        assert!(named("  ").is_err());
+        assert!(named("gate").is_ok());
+    }
 
     #[test]
     fn inference_only_claims_what_is_unambiguous() {

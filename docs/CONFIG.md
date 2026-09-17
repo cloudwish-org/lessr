@@ -97,6 +97,22 @@ has turned off for a repo (loop-safety 5) stays off, and no layer can promote
 it. Configuration tunes a mechanism; it does not overrule the evidence that the
 mechanism is hurting this repo.
 
+The floor lives in `healing.toml`, beside `config.toml`. Only the recorder
+writes it — it is the one part of the configuration a user does not own,
+because it is a measurement rather than a preference:
+
+```toml
+# Written by the self-healing table (loop-safety 5). Not edited by hand.
+[[off]]
+stage = "gate"
+repo = "/home/dev/work/monorepo"   # absent means everywhere
+reason = "handles expanded on 14% of outputs, over the 10% limit"
+```
+
+`lessr on <stage>` against a floored stage refuses and prints the reason. It
+does not fail silently and it does not appear to succeed: a kill switch that
+looks like it worked and did not is worse than one that says no.
+
 ```toml
 [stages.default]
 mode = "shadow"
@@ -155,6 +171,12 @@ the safety floor turned off.
 | `lessr config` | Every value in force, and which layer set it |
 | `lessr config --explain <stage>` | Why this stage is doing what it is doing |
 | `lessr config set <key> <value>` | Edit without opening the file |
+
+Keys are `stages.<stage>.{mode,level,<tunable>}`, `stages.default.{…}` and
+`proxy.port`. A value that a mechanism cannot use is dropped and reported, so
+the table always prints what is genuinely in force; an unrecognised key is kept
+and reported, because a Pro stage this binary does not register may be the one
+that reads it.
 
 All of them write `config.toml` and regenerate the snapshot. `--repo` scopes any
 of them to the current repository.
