@@ -1,0 +1,49 @@
+   Compiling lessr-core v0.1.0 (/home/dev/lessr/crates/lessr-core)
+   Compiling lessr-packs v0.1.0 (/home/dev/lessr/crates/lessr-packs)
+   Compiling lessr-gate v0.1.0 (/home/dev/lessr/crates/lessr-gate)
+warning: unused variable: `budget`
+  --> crates/lessr-gate/src/filters/cargo_test.rs:41:9
+   |
+41 |     let budget = Budget::default();
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_budget`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.21s
+     Running unittests src/lib.rs (target/debug/deps/lessr_core-8f2a1c4d9e7b3a06)
+
+running 24 tests
+test budget::tests::classifies_against_the_documented_limits ... ok
+test budget::tests::the_limits_are_the_ones_the_docs_promise ... ok
+test estimator::tests::starts_at_four_bytes_per_token ... ok
+test estimator::tests::observation_moves_the_ratio_towards_the_truth ... ok
+test estimator::tests::nonsense_samples_are_ignored ... ok
+test handle::tests::a_handle_returns_the_original_bytes ... ok
+test handle::tests::ids_are_four_hex_characters_by_default ... ok
+test handle::tests::the_same_bytes_twice_is_one_handle ... ok
+test handle::tests::an_unknown_handle_is_none_not_an_error ... ok
+test handle::tests::parse_rejects_what_is_not_a_handle ... ok
+test pipeline::tests::an_empty_pipeline_passes_content_through_untouched ... ok
+test pipeline::tests::an_active_stage_rewrites_and_counts ... ok
+test pipeline::tests::a_shadow_stage_counts_without_changing_what_the_agent_sees ... ok
+test pipeline::tests::stages_run_in_registration_order ... ok
+test pipeline::tests::a_pro_stage_can_insert_itself_around_a_free_one ... ok
+test gate::filters::git_status::tests::untracked_block_collapses ... ok
+test gate::filters::cargo_test::tests::passing_lines_become_a_count ... FAILED
+test gate::guard::tests::error_lines_survive_every_filter ... ok
+
+failures:
+
+---- gate::filters::cargo_test::tests::passing_lines_become_a_count stdout ----
+thread 'gate::filters::cargo_test::tests::passing_lines_become_a_count' panicked at crates/lessr-gate/src/filters/cargo_test.rs:88:9:
+assertion `left == right` failed
+  left: "test result: ok. 24 passed"
+ right: "24 passed"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    gate::filters::cargo_test::tests::passing_lines_become_a_count
+
+test result: FAILED. 23 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p lessr-core --lib`

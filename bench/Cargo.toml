@@ -1,0 +1,20 @@
+[package]
+name = "lessr-bench"
+description = "End-to-end overhead benchmarks. Not published."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+toml = "1.1.6"
+
+[[bench]]
+name = "overhead"
+path = "overhead.rs"
+harness = false

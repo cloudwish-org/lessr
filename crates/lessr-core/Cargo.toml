@@ -1,0 +1,28 @@
+[package]
+name = "lessr-core"
+description = "The Lessr extension point: Stage, Pipeline, Budget, HandleStore and the token Estimator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = "0.8.12"
+blake3 = "1.8.7"
+bytes = "1.12.1"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+memchr = "2.8.3"
+tempfile = "3.27.0"
+toml = "1.1.6"
+
+[[bench]]
+name = "pipeline"
+harness = false

@@ -2,3 +2,25 @@
 p99_ms = 10
 p50_ms = 2
 fixture = "cargo-test-1mb"
+
+# End-to-end `lessr hook claude` invocation, process spawn included. This is the
+# install-level sanity gate, not the per-stage contract in [overhead]: every tool
+# call the agent makes pays this once, so it catches a hook path that started
+# parsing TOML or opening a database (see technique 7 in docs/PERFORMANCE.md).
+#
+# !! UNMEASURED PLACEHOLDER — DO NOT RELY ON THIS GATE YET. !!
+# These numbers were never measured against a real `lessr` binary; the binary did
+# not exist when this section was written. They are a guess sized off the spawn
+# floor of a minimal Rust binary on one Linux dev box (p50 1.6 ms, p99 1.9-2.1 ms
+# over 200 samples), padded for a slower, noisier CI runner and for macOS, whose
+# exec path is the more expensive of the two we gate on.
+#
+# Replace both with a real measurement before trusting a pass:
+#   cargo build --release -p lessr-cli
+#   cargo bench -p lessr-bench --bench overhead
+# then set p99 to roughly 3x and p50 to roughly 3x the slower platform's result.
+# Until that happens this gate only catches a catastrophic regression.
+[end_to_end]
+p99_ms = 25
+p50_ms = 10
+fixture = "claude-post-tool-use"

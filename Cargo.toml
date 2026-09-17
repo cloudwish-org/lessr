@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lessr-core",
+    "crates/lessr-gate",
+    "crates/lessr-dedup",
+    "crates/lessr-detect",
+    "crates/lessr-receipt",
+    "crates/lessr-proxy",
+    "crates/lessr-adapters",
+    "crates/lessr-packs",
+    "crates/lessr-cli",
+    "bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/cloudwish-org/lessr"
+homepage = "https://lessr.dev"
+authors = ["Lessr contributors"]
+
+[workspace.lints.clippy]
+# Filters run per line on the hot path; an allocation here is a budget bug.
+all = { level = "deny", priority = -1 }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+# The benches measure the release pipeline; they need unwinding, which cargo
+# already forces for the bench profile, and the same codegen as release.
+[profile.bench]
+lto = "fat"
+codegen-units = 1

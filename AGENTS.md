@@ -14,6 +14,7 @@ The open-source engine and base pack of Lessr, a local token-saving layer for co
 4. **Never mutate a request while the cache is warm.** `lessr-detect` in this repo is report-only. Request mutation belongs to Pro crates.
 5. **Receipt writes are off the hot path.** `Recorder` uses a channel and a background thread. Never call SQLite from a stage.
 6. **Nothing leaves the machine.** No network calls except the forwarded provider request in `lessr-proxy`.
+7. **Free never depends on Pro; Pro may be named, never nagged.** No crate here may depend on, import or feature-flag a Pro crate — `lessr_cli::run(PipelineBuilder)` is the only seam, and Pro registers stages through it from outside. Free *may* print what Pro adds: a static list of names and one URL, in `lessr pro` and one suppressible section of `lessr gain`. It may never appear in hook output, because hook output enters the agent's context and is billed again on every later turn. See `crates/lessr-cli/src/pro.rs`.
 
 ## How the code is organised
 

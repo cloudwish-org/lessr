@@ -1,0 +1,6 @@
+# Pinned so a contributor's machine, a coding agent's sandbox and CI all agree
+# on what `-D warnings` means. Edition 2024 needs 1.85 or newer; the workspace
+# declares that as its `rust-version`.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

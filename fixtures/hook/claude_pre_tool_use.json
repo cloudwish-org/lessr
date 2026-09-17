@@ -1,0 +1,12 @@
+{
+  "session_id": "b4f1c2a0-9d31-4e77-8a55-1c0de9f3b210",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-lessr/b4f1c2a0.jsonl",
+  "cwd": "/home/dev/lessr",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cargo test --workspace",
+    "description": "Run the test suite"
+  }
+}

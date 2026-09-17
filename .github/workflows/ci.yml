@@ -1,0 +1,85 @@
+# fmt, clippy, tests and the two performance gates, on Linux and macOS.
+#
+# The gates are the point of the `bench` job: both bench binaries compare their
+# measured p99 against `bench/budget.toml` and exit non-zero when they are over,
+# so being over budget fails the job on its own. Nothing here re-parses their
+# output — the exit code is the contract. See docs/PERFORMANCE.md.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A new push makes the run in flight pointless; the bench job in particular is
+# expensive enough to be worth cancelling.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Lessr ships on both, and the filters touch bytes and paths. A failure on
+      # one platform should not hide the other platform's result.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        # This action publishes its toolchains as branches, not version tags;
+        # `@stable` is the pinned name upstream documents.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        # Denied warnings are the workspace lint policy in Cargo.toml, restated
+        # here so a local `cargo clippy` without the flag cannot pass what CI fails.
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  bench:
+    name: bench (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Spawn cost and allocator behaviour differ enough between the two that a
+      # budget met on Linux says nothing about macOS.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    # Deliberately not `needs: test`. A perf regression and a lint failure are
+    # different problems, and waiting for one to learn about the other only
+    # slows the fix down.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the release binary
+        # `bench/overhead.rs` measures a real `lessr hook claude` invocation, so
+        # it needs the binary as shipped: release profile, fat LTO, stripped.
+        # It looks for `target/release/lessr` and fails loudly if it is absent.
+        run: cargo build --release -p lessr-cli
+
+      - name: Pipeline overhead gate (per-stage, in process)
+        run: cargo bench -p lessr-core --bench pipeline
+
+      - name: End-to-end hook gate (process spawn included)
+        run: cargo bench -p lessr-bench --bench overhead
