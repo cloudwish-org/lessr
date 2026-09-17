@@ -81,7 +81,9 @@ Pro mechanisms take the same three axes. Their level semantics are in
 
 ## Layers
 
-Lowest to highest. The last one to set a value wins.
+Lowest to highest. The highest layer that set a value wins, **per field and
+per setting key** — a layer that sets only `mode` leaves `level` to the layer
+below it. That is the only reading under which `[stages.default]` is useful.
 
 1. Compiled-in defaults
 2. `[stages.default]`
@@ -130,6 +132,18 @@ TOML changes.
 A snapshot whose magic or version is not recognised is refused, and the
 defaults are used. Misreading old bytes as new ones would silently change what
 a mechanism does.
+
+One snapshot holds every scope: the global view, then one per repository, and
+the hook picks the deepest scope containing its working directory. It also
+records which layer set each value, so `lessr config --explain` works from the
+snapshot alone.
+
+**The environment layer is not baked in.** A snapshot is written once and read
+by every later hook, so an `LESSR_STAGE_GATE_MODE=off` compiled into it would
+outlive the shell that asked for it — and, worse, a shell that set nothing
+would silently inherit someone else's override. The hook applies the
+environment itself, on top of what it maps. It cannot use it to raise a stage
+the safety floor turned off.
 
 ## Commands
 
