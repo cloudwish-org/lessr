@@ -38,8 +38,8 @@ impl Paths {
     /// `~/.config/lessr` on Linux, `~/Library/Application Support/lessr` on
     /// macOS, `%APPDATA%\lessr` on Windows.
     pub fn detect() -> Result<Paths> {
-        let home = home_dir(std::env::var_os).ok_or(Error::NoHome)?;
-        let config = config_dir(&home, std::env::var_os);
+        let home = home_dir(env_var).ok_or(Error::NoHome)?;
+        let config = config_dir(&home, env_var);
         Ok(Paths { home, config })
     }
 
@@ -57,6 +57,15 @@ impl Paths {
     pub fn backups_dir(&self) -> PathBuf {
         self.config.join("backups")
     }
+}
+
+/// [`std::env::var_os`], narrowed to `&str` keys.
+///
+/// The standard library's is generic over the key type, which makes it one
+/// lifetime short of what a `Fn(&str) -> _` parameter asks for. A named
+/// function is cheaper than making every caller spell out a closure.
+fn env_var(key: &str) -> Option<OsString> {
+    std::env::var_os(key)
 }
 
 /// The home directory, as the platform names it.
@@ -85,7 +94,10 @@ fn config_dir(home: &Path, var: impl Fn(&str) -> Option<OsString>) -> PathBuf {
         );
     }
     if cfg!(target_os = "macos") {
-        return home.join("Library").join("Application Support").join(DIR_NAME);
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join(DIR_NAME);
     }
     // XDG says a relative `XDG_CONFIG_HOME` is to be ignored, and ignoring it
     // is also what keeps us from writing into whatever directory the agent

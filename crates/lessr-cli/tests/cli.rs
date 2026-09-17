@@ -129,7 +129,10 @@ fn the_hook_writes_nothing_but_the_payload_to_stdout() {
 
     let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
     for marketing in ["lessr.dev", "upgrade", "left on the table"] {
-        assert!(!text.contains(marketing), "hook stdout contains {marketing:?}");
+        assert!(
+            !text.contains(marketing),
+            "hook stdout contains {marketing:?}"
+        );
     }
 }
 
@@ -253,7 +256,11 @@ fn init_then_uninstall_restores_the_file_byte_for_byte() {
     assert!(patched.contains("lessr"), "the hook was not installed");
     assert!(patched.contains("dark"), "init lost an unrelated setting");
 
-    let out = run(home.path(), &["uninstall", "--yes", "--agent", "claude"], None);
+    let out = run(
+        home.path(),
+        &["uninstall", "--yes", "--agent", "claude"],
+        None,
+    );
     assert!(
         out.status.success(),
         "uninstall failed: {}",

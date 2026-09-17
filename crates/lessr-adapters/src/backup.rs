@@ -75,9 +75,10 @@ pub(crate) fn index_beside(stored_as: &Path) -> PathBuf {
 /// the only pristine one left.
 pub(crate) fn destination(paths: &Paths, agent: AgentId, original: &Path) -> PathBuf {
     let dir = paths.backups_dir().join(agent.as_str());
-    let name = original
-        .file_name()
-        .map_or_else(|| String::from("config"), |n| n.to_string_lossy().into_owned());
+    let name = original.file_name().map_or_else(
+        || String::from("config"),
+        |n| n.to_string_lossy().into_owned(),
+    );
     let stamp = now();
 
     let first = dir.join(format!("{name}.{stamp}.bak"));
@@ -221,7 +222,9 @@ mod tests {
         assert_eq!(record.stored_as, to);
         assert_eq!(
             record.blake3,
-            blake3::hash(b"{\"model\": \"opus\"}\n").to_hex().to_string()
+            blake3::hash(b"{\"model\": \"opus\"}\n")
+                .to_hex()
+                .to_string()
         );
         assert_eq!(newest_for(&records, AgentId::ClaudeCode), Some(record));
         assert_eq!(newest_for(&records, AgentId::Cursor), None);

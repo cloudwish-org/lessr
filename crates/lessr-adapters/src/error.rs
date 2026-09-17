@@ -64,6 +64,13 @@ pub enum Error {
     #[error("hook input is not a JSON object")]
     HookShape,
 
+    /// An adapter whose config format is not verified produced a change that
+    /// would write. A bug in this crate, caught before it reaches a user's
+    /// config: an unverified adapter prints instructions, it does not edit
+    /// files. Named after the agent so the bug report writes itself.
+    #[error("the {0} adapter is not verified and must not write to a config")]
+    UnverifiedWrite(&'static str),
+
     /// Someone asked for the hook of an agent that is configured another way.
     /// The generic adapter is a `base_url`, not a hook.
     #[error("{0} has no hook; it is configured with a base_url")]

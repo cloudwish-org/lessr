@@ -46,7 +46,8 @@ use crate::plan::Plan;
 /// can be pointed at, per `docs/ARCHITECTURE.md`. It is the fallback an
 /// unverified adapter offers, because it works today and cannot corrupt
 /// anything: the agent either reaches the proxy or it does not.
-pub(crate) const PROXY_ENV: &str = "ANTHROPIC_BASE_URL=http://127.0.0.1:7433\nOPENAI_BASE_URL=http://127.0.0.1:7433/v1";
+pub(crate) const PROXY_ENV: &str =
+    "ANTHROPIC_BASE_URL=http://127.0.0.1:7433\nOPENAI_BASE_URL=http://127.0.0.1:7433/v1";
 
 /// How sure we are of an agent's real on-disk config format.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

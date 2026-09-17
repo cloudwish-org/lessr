@@ -9,10 +9,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::agent::AgentId;
-use crate::agents;
+use crate::agents::{self, Adapter, Confidence};
 use crate::backup;
 use crate::diff;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::file;
 use crate::paths::Paths;
 
@@ -109,7 +109,8 @@ impl Plan {
                     let label = path.display();
                     let verb = if before.is_some() { "patch" } else { "create" };
                     let _ = writeln!(out, "  {verb}   {label}: {summary}");
-                    let body = diff::unified(before.as_deref().unwrap_or(""), after, &label.to_string());
+                    let body =
+                        diff::unified(before.as_deref().unwrap_or(""), after, &label.to_string());
                     indent_into(&mut out, &body, "    ");
                 }
                 Change::Backup { from, to } => {
@@ -152,7 +153,11 @@ impl Plan {
     }
 
     /// A plan the user carries out by hand.
-    pub(crate) fn manual(agent: AgentId, title: impl Into<String>, snippet: impl Into<String>) -> Plan {
+    pub(crate) fn manual(
+        agent: AgentId,
+        title: impl Into<String>,
+        snippet: impl Into<String>,
+    ) -> Plan {
         Plan {
             agent,
             changes: vec![Change::Manual {
@@ -178,12 +183,18 @@ pub struct Applied {
 /// caller owns it because the binary's own name and path are the caller's
 /// business: a Homebrew install and a `cargo run` are not the same string.
 pub fn plan_init(paths: &Paths, agent: AgentId, hook_command: &str) -> Result<Plan> {
-    agents::adapter(agent).plan_init(paths, hook_command)
+    let adapter = agents::adapter(agent);
+    let plan = adapter.plan_init(paths, hook_command)?;
+    writes_allowed(adapter, &plan)?;
+    Ok(plan)
 }
 
 /// Plan the removal of whatever `lessr init` did for one agent.
 pub fn plan_uninstall(paths: &Paths, agent: AgentId) -> Result<Plan> {
-    agents::adapter(agent).plan_uninstall(paths)
+    let adapter = agents::adapter(agent);
+    let plan = adapter.plan_uninstall(paths)?;
+    writes_allowed(adapter, &plan)?;
+    Ok(plan)
 }
 
 /// Carry out a plan.
@@ -217,6 +228,33 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
     }
 
     Ok(applied)
+}
+
+/// Refuse a plan that would write on behalf of an agent whose format is not
+/// verified.
+///
+/// The rule is stated once in `crate::agents` and enforced here rather than
+/// left to review, because the failure it guards against — a wrong entry in a
+/// config Lessr did not understand — is silent, permanent and someone else's
+/// agent. Nothing an [`Confidence::Unverified`] adapter returns today trips it;
+/// that is the point.
+fn writes_allowed(adapter: &dyn Adapter, plan: &Plan) -> Result<()> {
+    if adapter.confidence() == Confidence::Verified {
+        return Ok(());
+    }
+    let writes = plan.changes.iter().any(|change| {
+        matches!(
+            change,
+            Change::WriteJson { .. }
+                | Change::WriteFile { .. }
+                | Change::Backup { .. }
+                | Change::Restore { .. }
+        )
+    });
+    if writes {
+        return Err(Error::UnverifiedWrite(adapter.id().display_name()));
+    }
+    Ok(())
 }
 
 /// Copy `body` into `out`, indenting every line. Blank lines stay blank rather
@@ -270,9 +308,31 @@ mod tests {
             }],
         };
         let rendered = plan.render();
-        assert!(rendered.contains("patch   /home/dev/.claude/settings.json: add the hook"), "{rendered}");
+        assert!(
+            rendered.contains("patch   /home/dev/.claude/settings.json: add the hook"),
+            "{rendered}"
+        );
         assert!(rendered.contains("    +  \"hooks\": {}"), "{rendered}");
         assert!(rendered.contains("    @@ "), "{rendered}");
+    }
+
+    #[test]
+    fn an_unverified_adapter_is_not_allowed_to_write() {
+        let cursor = agents::adapter(AgentId::Cursor);
+        let manual = Plan::manual(AgentId::Cursor, "by hand", "FOO=1");
+        assert!(writes_allowed(cursor, &manual).is_ok());
+
+        let writing = Plan {
+            agent: AgentId::Cursor,
+            changes: vec![Change::WriteJson {
+                path: PathBuf::from("/home/dev/.cursor/hooks.json"),
+                before: None,
+                after: "{}\n".to_string(),
+                summary: "guesswork".to_string(),
+            }],
+        };
+        let err = writes_allowed(cursor, &writing).unwrap_err();
+        assert!(err.to_string().contains("not verified"), "{err}");
     }
 
     #[test]
@@ -304,6 +364,9 @@ mod tests {
         assert_eq!(applied.backups, vec![copy.clone()]);
         assert_eq!(applied.changed, vec![original.clone()]);
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), "{\"old\": true}\n");
-        assert_eq!(std::fs::read_to_string(&original).unwrap(), "{\"new\": true}\n");
+        assert_eq!(
+            std::fs::read_to_string(&original).unwrap(),
+            "{\"new\": true}\n"
+        );
     }
 }

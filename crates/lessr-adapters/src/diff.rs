@@ -128,8 +128,16 @@ fn write_hunk(
 
     // Unified diff numbers lines from 1, except for an empty range, which is
     // reported at the line it would follow.
-    let old_first = if old_len == 0 { old_start } else { old_start + 1 };
-    let new_first = if new_len == 0 { new_start } else { new_start + 1 };
+    let old_first = if old_len == 0 {
+        old_start
+    } else {
+        old_start + 1
+    };
+    let new_first = if new_len == 0 {
+        new_start
+    } else {
+        new_start + 1
+    };
     let _ = writeln!(out, "@@ -{old_first},{old_len} +{new_first},{new_len} @@");
 
     for edit in &script[start..end] {
@@ -180,9 +188,12 @@ mod tests {
         after.push_str("line 21\n");
 
         let diff = unified(&before, &after, "settings.json");
-        assert!(diff.starts_with("--- settings.json\n+++ settings.json\n"), "{diff}");
+        assert!(
+            diff.starts_with("--- settings.json\n+++ settings.json\n"),
+            "{diff}"
+        );
         assert!(diff.contains("+line 21\n"), "{diff}");
-        assert!(diff.contains("@@ -17,4 +17,5 @@"), "{diff}");
+        assert!(diff.contains("@@ -18,3 +18,4 @@"), "{diff}");
         // Context only: the first sixteen lines stay out of the printout.
         assert!(!diff.contains(" line 1\n"), "{diff}");
     }

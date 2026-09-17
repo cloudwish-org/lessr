@@ -40,9 +40,8 @@ impl Adapter for Generic {
     }
 
     fn plan_init(&self, _paths: &Paths, _hook_command: &str) -> Result<Plan> {
-        let mut snippet = String::from(
-            "Point the agent at the Lessr proxy and leave everything else alone:\n\n",
-        );
+        let mut snippet =
+            String::from("Point the agent at the Lessr proxy and leave everything else alone:\n\n");
         for line in PROXY_ENV.lines() {
             snippet.push_str("    ");
             snippet.push_str(line);
@@ -92,7 +91,10 @@ mod tests {
         assert!(applied.changed.is_empty());
         assert!(applied.backups.is_empty());
         assert!(!paths.home.exists(), "nothing under home was created");
-        assert!(!paths.config.exists(), "nothing under the config dir was created");
+        assert!(
+            !paths.config.exists(),
+            "nothing under the config dir was created"
+        );
     }
 
     #[test]
@@ -102,8 +104,14 @@ mod tests {
             .plan_init(&paths, "lessr hook generic")
             .unwrap()
             .render();
-        assert!(rendered.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:7433"), "{rendered}");
-        assert!(rendered.contains("OPENAI_BASE_URL=http://127.0.0.1:7433/v1"), "{rendered}");
+        assert!(
+            rendered.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:7433"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("OPENAI_BASE_URL=http://127.0.0.1:7433/v1"),
+            "{rendered}"
+        );
         assert!(rendered.contains("OpenRouter"), "{rendered}");
     }
 

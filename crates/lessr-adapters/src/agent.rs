@@ -106,7 +106,10 @@ impl AgentId {
     /// mistyped `--agent Claude` should configure an agent rather than teach
     /// the user about ASCII.
     pub fn parse(s: &str) -> Option<AgentId> {
-        if let Some(&id) = AgentId::all().iter().find(|id| s.eq_ignore_ascii_case(id.as_str())) {
+        if let Some(&id) = AgentId::all()
+            .iter()
+            .find(|id| s.eq_ignore_ascii_case(id.as_str()))
+        {
             return Some(id);
         }
         ALIASES
